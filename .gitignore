@@ -1,0 +1,13 @@
+.build/
+build/
+.swiftpm/
+.DS_Store
+*.xcodeproj
+*.xcworkspace
+*.xcuserdata
+.env
+.env.*
+!.env.example
+.claude/settings.local.json
+CLAUDE.local.md
+MASTER_PLAN.md
