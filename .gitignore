@@ -11,3 +11,6 @@ build/
 .claude/settings.local.json
 CLAUDE.local.md
 MASTER_PLAN.md
+
+# Antigravity CLI
+.antigravitycli/
