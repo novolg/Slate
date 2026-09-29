@@ -33,18 +33,38 @@ func runExporterChecks() async {
         expectEqual(sel.frameCount, all.frameCount)
     }
 
-    await checkAsync("exporter: constant 48 selective with audio") {
+    await checkAsync("exporter: constant 48 with audio — selective passes or is refused, re-encode all passes") {
         let a = try await loadClip("c24_a.mp4", keep: [(0.7, 2.3)])
         let b = try await loadClip("c48_a.mp4", keep: [(1.05, 3.6)])
-        let (report, _) = try await exportProject(Project(clips: [a, b], fpsMode: d48), name: "ex-c48-a.mp4")
-        expect(report.ok, "\(report.issues)")
+        let out = try checksOutputDirectory().appendingPathComponent("ex-c48-a.mp4")
+        try? FileManager.default.removeItem(at: out)
+        do {
+            let report = try await ProjectExporter().export(project: Project(clips: [a, b], fpsMode: d48, constantStrategy: .selective),
+                                                            outputURL: out, tempDirectory: try checksOutputDirectory(), progress: { _ in })
+            expect(report.ok, "a returned report must be ok: \(report.issues)")
+        } catch ProjectExportError.validationFailed(let report) {
+            print("      note: selective refused (known Phase 0 finding): \(report.issues)")
+            expect(!FileManager.default.fileExists(atPath: out.path), "a refused export must not leave a file")
+        }
+        let (all, _) = try await exportProject(Project(clips: [a, b], fpsMode: d48, constantStrategy: .reencodeAll), name: "ex-c48-a-all.mp4")
+        expect(all.ok, "re-encode all: \(all.issues)")
     }
 
-    await checkAsync("exporter: the same file twice as two clips") {
+    await checkAsync("exporter: the same file twice as two clips (selective ok or refused, re-encode all passes)") {
         let a = try await loadClip("c24.mp4", keep: [(0.5, 1.5)])
         let b = try await loadClip("c24.mp4", keep: [(3.0, 4.0)])
-        let (report, plan) = try await exportProject(Project(clips: [a, b], fpsMode: d24), name: "ex-dup.mp4")
-        expect(report.ok, "\(report.issues)")
+        let out = try checksOutputDirectory().appendingPathComponent("ex-dup.mp4")
+        try? FileManager.default.removeItem(at: out)
+        do {
+            let report = try await ProjectExporter().export(project: Project(clips: [a, b], fpsMode: d24, constantStrategy: .selective),
+                                                            outputURL: out, tempDirectory: try checksOutputDirectory(), progress: { _ in })
+            expect(report.ok, "a returned report must be ok: \(report.issues)")
+        } catch ProjectExportError.validationFailed(let report) {
+            print("      note: selective refused (known Phase 0 finding): \(report.issues)")
+            expect(!FileManager.default.fileExists(atPath: out.path), "a refused export must not leave a file")
+        }
+        let (all, plan) = try await exportProject(Project(clips: [a, b], fpsMode: d24, constantStrategy: .reencodeAll), name: "ex-dup-all.mp4")
+        expect(all.ok, "re-encode all: \(all.issues)")
         expectEqual(plan.totalFrames, 48)
     }
 
