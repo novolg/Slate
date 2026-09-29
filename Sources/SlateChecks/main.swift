@@ -10,5 +10,6 @@ runFrameGridChecks()
 runPlannerChecks()
 runRetimerChecks()
 runTimeMapChecks()
+await runProbeChecks()
 
 Harness.finish()
