@@ -7,5 +7,6 @@ runSegmentChecks()
 runRationalChecks()
 runFrameTableChecks()
 runFrameGridChecks()
+runPlannerChecks()
 
 Harness.finish()

@@ -1,3 +1,4 @@
+import CoreMedia
 import Foundation
 import SlateCore
 
@@ -30,4 +31,22 @@ enum TestData {
         }
         return FrameTable(pts: pts, durations: durations, timescale: 90000)
     }
+}
+
+extension TestData {
+    static func media(_ frames: FrameTable, width: Int = 640, height: Int = 360,
+                      codec: String = "avc1", audio: Bool = false) -> ClipMedia {
+        ClipMedia(frames: frames, width: width, height: height, codec: fourCC(codec),
+                  nominalFPS: 1 / frames.durations[0].seconds, estimatedDataRate: 2_000_000,
+                  audio: audio ? AudioFormat(sampleRate: 44100, channels: 1) : nil)
+    }
+
+    static func clip(_ media: ClipMedia?, keep ranges: [(Rational, Rational)]) -> Clip {
+        Clip(url: URL(fileURLWithPath: "/tmp/fake-\(UUID().uuidString).mp4"),
+             segments: ranges.map { Segment(range: CMTimeRange(start: $0.0.cmTime, end: $0.1.cmTime)) },
+             media: media)
+    }
+
+    static let c24 = FrameTable.uniform(count: 120, frameDuration: Rational(1, 24), timescale: 12288)
+    static let c48 = FrameTable.uniform(count: 240, frameDuration: Rational(1, 48), timescale: 12288)
 }
