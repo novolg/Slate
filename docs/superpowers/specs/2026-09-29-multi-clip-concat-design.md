@@ -99,7 +99,7 @@ status bar.
 - **Player mode toggle `Clip / Project`:**
   - Clip: plays the selected clip's full source (for trimming).
   - Project: plays an `AVMutableComposition` built from the **same grid
-    segments as the export** (`[s', s' + N · d)` at `O_k`), rebuilt on every
+    segments as the export** (each grid segment at `O_k`), rebuilt on every
     change. So joins, card seek positions, and total duration match the
     output exactly. The only difference: re-encoded clips preview their
     source frames, so a 48 fps clip in a Constant-24 project previews at 48.
@@ -167,46 +167,68 @@ All timing math uses **actual sample timestamps**, never nominal fps or
 - `ClipProbe` reads every video sample's pts and duration in presentation
   order (a 5 s clip has ~240 samples; this reuses the `KeyframeScanner`
   reader pass). It stores `frames: [(pts, duration)]` and the track timescale.
+- **Arithmetic.** All timing math uses an exact `Rational` type (Int64
+  numerator and denominator, reduced by gcd) converted from and to `CMTime`.
+  Comparisons are exact. `round(x)` means `floor(x + 1/2)`.
+- **Frame boundaries.** For a clip with frames `0…n−1`, the boundary set is
+  `B = {pts_0, …, pts_{n−1}, clipEnd}` with `clipEnd = pts_{n−1} +
+  duration_{n−1}`. Every snap goes to the nearest element of `B`. So a
+  full-clip selection `[0, clipEnd)` keeps all n frames.
+- **Jitter tolerance `τ`.** Some files store an exact rate with rounded
+  ticks, for example 23.976 at timescale 90000 gives durations 3753 and 3754.
+  So `τ = 1 tick` only when `1 tick ≤ srcD / 100`. Otherwise `τ = 0`. At
+  timescale 24, one tick is a whole frame, so `τ = 0` and all comparisons are
+  exact. `τ` is the only tolerance anywhere in the spec.
 - **CFR check.** A clip is CFR when every frame duration and every gap between
-  consecutive pts are equal, with a tolerance of 1 tick of the track
-  timescale. Then `srcD` is that common duration. Otherwise the clip is VFR.
-- `d` is a rational `CMTime`. If a CFR clip's `srcD` matches the target, use
-  that exact `srcD` (this handles `1001/24000` for 23.976). Otherwise build
-  `d` from the target value.
+  consecutive pts equal the mean `srcD = (clipEnd − pts_0) / n` within `τ`.
+  Otherwise the clip is VFR.
+- `d` is exact. If a CFR clip's `srcD` equals the target rate within `τ`, `d`
+  is that clip's `srcD` (this gives `1001/24000` for 23.976). Otherwise `d`
+  is built from the target value.
 - **Copy eligibility (Constant mode).** A clip is copied only if it is CFR
-  and `srcD == d` within 1 tick. Every other clip is re-encoded, including a
-  VFR clip whose nominal fps equals the target. The plan row shows the reason
-  ("fps differs" or "not constant frame rate").
-- Each kept segment `[s, e)` of every clip becomes a **grid segment**
-  `(clip, s', N)`:
-  - `s'` = the actual source frame pts nearest to `s`.
-  - Copy clips: `N` = number of source frames with pts in `[s', e)`. Since the
-    clip is CFR with `srcD == d`, the range `[s', s' + N · d)` is exactly N
-    whole frames.
-  - Re-encode clips: `N = round((e − s) / d)`, clamped so `s' + N · d` does
-    not pass the clip end (last pts + last duration).
-  - Segments with `N = 0` are dropped. The plan lists each one as
-    "shorter than one frame, skipped".
-- Output offsets: grid segment k starts at `O_k = Σ_{j<k} N_j · d`. All offsets
-  and durations are integer multiples of `d`, so joins cannot break cadence.
-- **Mixed mode** uses the same builder without a global `d`. `s'` and the end
-  are snapped to the nearest actual frame pts, `N` counts actual frames, and
-  offsets add the actual frame durations. VFR sources work unchanged.
+  and `|srcD − d| · n ≤ τ` (no drift across the clip). Every other clip is
+  re-encoded, including a VFR clip whose nominal fps equals the target. The
+  plan row shows the reason ("fps differs" or "not constant frame rate").
+
+#### One quantization policy (`FrameGrid`, pure)
+
+Quantization runs **before** the copy/re-encode choice, so the strategy can
+never change the edit. "Re-encode everything" produces the same frame count
+and offsets as "Selective".
+
+For each kept segment `[s, e)`:
+- `s'` = nearest element of `B` to `s`.
+- `N = round((e − s) / D)`, where `D = d` in Constant mode and `D` = the
+  clip's `srcD` in Mixed mode.
+- Clamp `N` so `s' + N · D ≤ clipEnd` (the end is included, so a full clip
+  keeps its last frame).
+- `N = 0` → the segment is dropped and listed as "shorter than one frame,
+  skipped". Example: `[0, 10 ms)` at 24 fps gives `N = 0` in every strategy,
+  so a project with only that selection is blocked.
+- Output offsets: segment k starts at `O_k = Σ_{j<k} N_j · D`.
+
+In Constant mode every offset and duration is a multiple of `d`, so joins
+cannot break cadence.
+
+**Mixed mode with a VFR clip** (no single `srcD`): `s'` and `e'` are both
+snapped to the nearest element of `B`, `N` = number of source frames in
+`[s', e')`, and the segment duration is `e' − s'`.
 
 #### Copy clips
 
-The composition inserts source range `[s', s' + N · d)` at `O_k`.
+The composition inserts the source range `[pts_a, pts_{a+N})` at `O_k`, where
+`pts_a = s'` (use `clipEnd` when `a + N = n`). These are exactly the N source
+frames. With `τ > 0` the range can differ from `N · d` by at most `τ`.
 
 #### Re-encode clips (`FrameRetimer`, pure)
 
 - For output frame `i` (0 ≤ i < N) of a grid segment, source time is
   `t_i = s' + i · d`. The retimer picks the source frame with the **largest
-  actual pts `≤ t_i + ε`**. `ε` is 1 tick of the source track timescale. It
-  only absorbs timescale rounding and is far smaller than a frame. Math is
-  exact rational `CMTime` arithmetic.
-- Result on 5 source frames: 24 → 48 picks `0,0,1,1,2,2,3,3,4,4`; 48 → 24
-  picks `0,2,4,…`. Speed is unchanged. Works for VFR sources too, because it
-  reads the pts list.
+  actual pts `≤ t_i + τ`**. `τ` is the bounded tolerance above. It is 0 when a
+  tick is coarse, so it can never move the choice to a later frame.
+- Result on 5 source frames: 24 → 48 picks `0,0,1,1,2,2,3,3,4,4`, also at
+  timescale 24. 48 → 24 picks `0,2,4,…`. Speed is unchanged. VFR sources
+  work too, because the retimer reads the pts list.
 - Removed intervals are skipped because each grid segment maps on its own:
   kept ranges `[2, 3)` and `[4, 5)` give output `[0, 1)` from source 2…3 and
   output `[1, 2)` from source 4…5.
@@ -222,7 +244,7 @@ The composition inserts source range `[s', s' + N · d)` at `O_k`.
 #### Audio
 
 - For every grid segment the audio range is exactly the video range:
-  source `[s', s' + N · d)` inserted at `O_k`. So audio and video share one
+  the same source range as the video segment, inserted at `O_k`. So audio and video share one
   output clock and drift cannot build up across joins.
 - Copy clips: audio is passthrough. AAC packets (~21 ms) do not align with
   video frames, so the composition trims them with edit lists. Error stays
@@ -250,7 +272,7 @@ The composition inserts source range `[s', s' + N · d)` at `O_k`.
 After a Constant-mode export, read the output with `AVAssetReader` (decoded
 frames, which respects edit lists):
 - every frame duration is `d`,
-- frame n has pts `n · d` (tolerance: 1 tick of the track timescale),
+- frame n has pts `n · d` (tolerance: output `τ`, the same rule as above),
 - frame count is `Σ N_k`,
 - the first decoded audio sample is presented at 0 (± one AAC packet), so
   priming is compensated,
@@ -342,6 +364,15 @@ The spike code is throwaway, but `FrameGrid`, `FrameRetimer`, and
   export plan, `ProjectTimeMap` (both directions, segment edges, zero-length
   clips), auto-segment rules (first `O` replaces, edge drag converts),
   `SegmentOps` id preservation (regression guard).
+- Named regression cases from review:
+  - Mixed mode, full 5-frame clip `[0, clipEnd)` keeps all 5 frames.
+  - Timescale 24 source: `τ = 0`, and 24→48 still picks
+    `0,0,1,1,2,2,3,3,4,4`.
+  - 23.976 at timescale 90000 (3753/3754 durations) is CFR with `τ = 1 tick`.
+  - `[0, 10 ms)` at 24 fps gives `N = 0` under Selective and under Re-encode
+    all, and the plan is blocked.
+  - For random projects, Selective and Re-encode all give identical `N_k`
+    and `O_k`.
 - Integration: `CadenceValidator` runs on every generated export in the
   checks target.
 - Manual: generated test clips (24 fps and 48 fps, with and without audio,
