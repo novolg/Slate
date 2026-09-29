@@ -3172,6 +3172,37 @@ func runExporterChecks() async {
         expectEqual(try String(contentsOf: out, encoding: .utf8), "previous export")
     }
 
+    await checkAsync("exporter: keepInvalidAt aliasing a source or the destination is refused") {
+        let fm = FileManager.default
+        let dir = try checksOutputDirectory().appendingPathComponent("keep-invalid", isDirectory: true)
+        try? fm.removeItem(at: dir)
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        let src = dir.appendingPathComponent("src.mp4")
+        try fm.copyItem(at: try fixture("c24.mp4"), to: src)
+        let srcBytes = try Data(contentsOf: src)
+        let out = dir.appendingPathComponent("out.mp4")
+        try Data("previous export".utf8).write(to: out)
+        let media = try await ClipProbe.probe(url: src)
+        let clip = Clip(url: src, segments: [Segment(range: CMTimeRange(start: .zero, duration: CMTime(value: 1, timescale: 1)))],
+                        media: media)
+        let alias = dir.appendingPathComponent("alias")
+        try fm.createSymbolicLink(at: alias, withDestinationURL: dir)
+        for target in [src, out, alias.appendingPathComponent("src.mp4"), alias.appendingPathComponent("out.mp4")] {
+            let exporter = ProjectExporter()
+            exporter.keepInvalidAt = target
+            exporter.validator = { _, _ in CadenceReport(frameCount: 0, videoDuration: .zero, issues: ["simulated"]) }
+            do {
+                _ = try await exporter.export(project: Project(clips: [clip], fpsMode: d24), outputURL: out,
+                                              tempDirectory: dir, progress: { _ in })
+                expect(false, "keepInvalidAt \(target.lastPathComponent) not refused")
+            } catch ProjectExportError.outputIsSource {
+                // expected
+            }
+        }
+        expectEqual(try Data(contentsOf: src), srcBytes)
+        expectEqual(try String(contentsOf: out, encoding: .utf8), "previous export")
+    }
+
     await checkAsync("exporter: blocked project throws and writes nothing") {
         let a = try await loadClip("c24.mp4", keep: [(0, 1)])
         let small = try await loadClip("small24.mp4", keep: [(0, 1)])
@@ -3345,7 +3376,12 @@ public final class ProjectExporter: @unchecked Sendable {
                        progress: @escaping @Sendable (ExportStage) -> Void) async throws -> CadenceReport {
         let plan = ExportPlanner.plan(project)
         guard plan.canExport else { throw ProjectExportError.blocked(plan.blockers) }
-        if Self.outputCollides(outputURL, with: project.clips.map(\.url)) {
+        let sources = project.clips.map(\.url)
+        if Self.outputCollides(outputURL, with: sources) {
+            throw ProjectExportError.outputIsSource
+        }
+        // The diagnostic path must not alias a source or the real destination either.
+        if let keepInvalidAt, Self.outputCollides(keepInvalidAt, with: sources + [outputURL]) {
             throw ProjectExportError.outputIsSource
         }
 
@@ -3514,7 +3550,7 @@ public final class ProjectExporter: @unchecked Sendable {
 - [ ] **Step 4: Run to verify it passes**
 
 Run: `swift run SlateChecks exporter`
-Expected: `9 passed, 0 failed, 0 skipped`.
+Expected: `10 passed, 0 failed, 0 skipped`.
 
 A failure in "constant 24 selective" while "re-encode all" passes is a real Phase 0 finding. It is NOT a bug to hide. Record the issues text and continue to Task 13. The spec's decision rule decides what happens next.
 
