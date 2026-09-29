@@ -11,5 +11,6 @@ runPlannerChecks()
 runRetimerChecks()
 runTimeMapChecks()
 await runProbeChecks()
+await runValidatorChecks()
 
 Harness.finish()
