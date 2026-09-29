@@ -14,5 +14,6 @@ await runProbeChecks()
 await runValidatorChecks()
 await runCompositionChecks()
 await runReencoderChecks()
+await runExporterChecks()
 
 Harness.finish()
