@@ -24,11 +24,11 @@
 
 ## Review Focus
 
-1. **Two selections in one clip less than a frame apart** — snapping must never make them share a source frame. The pinning test is in Task 4 ("adjacent selections never share a frame").
-2. **Audio track a few ms shorter than video** (ffmpeg `-shortest`) — building the composition must not throw. The audio range is clipped to the audio track. The test is in Task 10.
-3. **Same file added twice as two clips** — the export must work with two clips that share one URL. The test is in Task 12.
-4. **Cancel during re-encode** — cancel must leave no temp files and no partial output file. The test is in Task 12.
-5. **Output path equals an input clip path** — the export must refuse to run, and it must never delete the source clip. The test is in Task 12.
+1. **Two selections in one clip less than a frame apart** — they must never share a source frame, also after 24→48 retiming and for VFR sources. The start is pushed to the next source boundary. Tests are in Task 4 and Task 6.
+2. **Audio track a few ms shorter than video** (ffmpeg `-shortest`) — building the composition must not throw. Re-encoding tolerates a shortfall of at most one AAC packet and throws beyond that. Tests are in Task 10 and Task 11.
+3. **A source that fails to decode midway** — the export must fail, never freeze on the last good frame, and remove its partial file. The test is in Task 11.
+4. **Cancel or failure with an existing file at the output path** — the old file must stay unchanged, and no temp or staging files may remain. The test is in Task 12.
+5. **Output path that is a source reached another way** (symlinked parent, case alias, hard link) — the export must refuse to run and never touch the source. Tests are in Task 12.
 
 ---
 
@@ -603,7 +603,7 @@ git commit -m "feat(core): exact Rational for timing math"
 
 **Interfaces:**
 - Consumes: `Rational` (Task 2).
-- Produces: `public struct FrameTable: Equatable { pts, durations, timescale, init(pts:durations:timescale:), static uniform(count:frameDuration:timescale:start:), count, clipEnd, boundaries, exactFrameDuration: Rational?, pickTolerance: Rational, nearestBoundaryIndex(to:) -> Int, lastFrameIndex(atOrBefore:) -> Int? }`
+- Produces: `public struct FrameTable: Equatable { pts, durations, timescale, init(pts:durations:timescale:), static uniform(count:frameDuration:timescale:start:), count, clipEnd, boundaries, exactFrameDuration: Rational?, pickTolerance: Rational, nearestBoundaryIndex(to:) -> Int, lastFrameIndex(atOrBefore:) -> Int?, firstBoundaryIndex(atOrAfter:) -> Int }`
 - Produces (checks): `TestData.jittered23976(count:)`, `TestData.drift(first:second:count:)`.
 
 - [ ] **Step 1: Write the test data helpers**
@@ -695,6 +695,13 @@ func runFrameTableChecks() {
         expect(five24.lastFrameIndex(atOrBefore: Rational(-1, 100)) == nil)
         expectEqual(five24.lastFrameIndex(atOrBefore: Rational(99)), 4)
     }
+
+    check("frametable: first boundary at or after") {
+        expectEqual(five24.firstBoundaryIndex(atOrAfter: Rational(1, 16)), 2)   // 1/16 is between 1/24 and 2/24
+        expectEqual(five24.firstBoundaryIndex(atOrAfter: Rational(1, 24)), 1)   // exact boundary
+        expectEqual(five24.firstBoundaryIndex(atOrAfter: .zero), 0)
+        expectEqual(five24.firstBoundaryIndex(atOrAfter: Rational(9)), 5)      // clamps to clip end
+    }
 }
 ```
 
@@ -782,13 +789,25 @@ public struct FrameTable: Equatable {
         }
         return lo == 0 ? nil : lo - 1
     }
+
+    /// Smallest index into `boundaries` whose value is ≥ `t` (count when `t` > clipEnd is clamped to count).
+    public func firstBoundaryIndex(atOrAfter t: Rational) -> Int {
+        let b = boundaries
+        var lo = 0
+        var hi = b.count
+        while lo < hi {
+            let mid = (lo + hi) / 2
+            if b[mid] < t { lo = mid + 1 } else { hi = mid }
+        }
+        return min(lo, b.count - 1)
+    }
 }
 ```
 
 - [ ] **Step 5: Run to verify it passes**
 
 Run: `swift run SlateChecks frametable`
-Expected: `5 passed, 0 failed, 0 skipped`.
+Expected: `6 passed, 0 failed, 0 skipped`.
 
 - [ ] **Step 6: Commit**
 
@@ -896,6 +915,15 @@ func runFrameGridChecks() {
         expectEqual(r.segments.count, 2)
         expect(r.segments[1].sourceStart >= r.segments[0].sourceEnd,
                "second starts at \(r.segments[1].sourceStart), first ends at \(r.segments[0].sourceEnd)")
+    }
+
+    check("framegrid: a pushed start lands on a source boundary") {
+        let s1 = seg(Rational(21, 1000), Rational(51, 1000))
+        let s2 = seg(Rational(52, 1000), Rational(100, 1000))
+        let r = FrameGrid.build([input(c24, [s1, s2])], mode: d48)
+        expectEqual(r.segments.count, 2)
+        expectEqual(r.segments[1].sourceStart, Rational(2, 24))
+        expectEqual(r.segments[1].frameCount, 2, "pushing the start keeps N")
     }
 
     check("framegrid: constant offsets are multiples of d (random projects)") {
@@ -1074,21 +1102,24 @@ public enum FrameGrid {
     /// Quantize one kept range `[s, e)`.
     /// - unit: d in Constant mode, the clip's exact srcD in Mixed mode, nil for a
     ///   non-exact-CFR clip in Mixed mode.
-    /// - notBefore: end of the previous quantized range of the same clip, so two
-    ///   selections never share a source frame.
+    /// - notBefore: end of the previous quantized range of the same clip. The start
+    ///   is pushed to the first source-frame boundary at or after it, so two
+    ///   selections never share a source frame (also at 24→48 and for VFR).
+    ///   Pushing the start keeps the wanted frame count N (the output length the user
+    ///   selected); only the clip-end clamp can shorten it.
     public static func quantize(start s: Rational, end e: Rational, frames: FrameTable,
                                 unit: Rational?, notBefore: Rational = .zero) -> QuantizedRange? {
         let b = frames.boundaries
-        var a = frames.nearestBoundaryIndex(to: s)
+        let floorIndex = frames.firstBoundaryIndex(atOrAfter: notBefore)
+        let a = max(frames.nearestBoundaryIndex(to: s), floorIndex)
         if let unit {
-            let sp = max(b[a], notBefore)
+            let sp = b[a]
             let wanted = ((e - s) / unit).rounded()
             let fits = ((frames.clipEnd - sp) / unit).floor()
             let n = min(wanted, fits)
             guard n > 0 else { return nil }
             return QuantizedRange(sourceStart: sp, frameCount: Int(n), duration: unit * Int(n))
         }
-        while a < b.count - 1, b[a] < notBefore { a += 1 }
         let z = frames.nearestBoundaryIndex(to: e)
         guard z > a else { return nil }
         return QuantizedRange(sourceStart: b[a], frameCount: z - a, duration: b[z] - b[a])
@@ -1147,7 +1178,7 @@ public enum FrameGrid {
 - [ ] **Step 5: Run to verify it passes**
 
 Run: `swift run SlateChecks framegrid`
-Expected: `8 passed, 0 failed, 0 skipped`.
+Expected: `9 passed, 0 failed, 0 skipped`.
 
 - [ ] **Step 6: Commit**
 
@@ -1534,6 +1565,26 @@ func runRetimerChecks() {
         expectEqual(second.last, 119)
     }
 
+    check("retimer: adjacent selections share no source frame (24→48 and VFR)") {
+        let vfr = FrameTable(pts: [0, 1, 3, 4, 5, 6].map { Rational(Int64($0), 24) },
+                             durations: [1, 2, 1, 1, 1, 1].map { Rational(Int64($0), 24) }, timescale: 24)
+        let d = Rational(1, 48)
+        for frames in [TestData.c24, vfr] {
+            // Review case: without boundary pushing, starts are 1/24 and 1/16 and both show frame 1.
+            let s1 = Segment(range: CMTimeRange(start: Rational(21, 1000).cmTime, end: Rational(51, 1000).cmTime))
+            let s2 = Segment(range: CMTimeRange(start: Rational(52, 1000).cmTime, end: Rational(100, 1000).cmTime))
+            let r = FrameGrid.build([FrameGrid.ClipInput(clipID: UUID(), frames: frames, segments: [s1, s2])],
+                                    mode: .constant(frameDuration: d))
+            expectEqual(r.segments.count, 2)
+            let picks = r.segments.map {
+                Set(FrameRetimer.sourceFrameIndices(frames: frames, sourceStart: $0.sourceStart,
+                                                    frameDuration: d, count: $0.frameCount))
+            }
+            expect(picks[0].isDisjoint(with: picks[1]), "shared: \(picks[0].intersection(picks[1]))")
+            expect(frames.boundaries.contains(r.segments[1].sourceStart), "start must be a source boundary")
+        }
+    }
+
     check("retimer: jittered 23.976 with τ matches exact picks on the ideal source") {
         let jit = TestData.jittered23976(count: 2400)
         let ideal = TestData.ideal23976(count: 2400)
@@ -1582,7 +1633,7 @@ public enum FrameRetimer {
 - [ ] **Step 4: Run to verify it passes**
 
 Run: `swift run SlateChecks retimer`
-Expected: `6 passed, 0 failed, 0 skipped`.
+Expected: `7 passed, 0 failed, 0 skipped`.
 
 - [ ] **Step 5: Commit**
 
@@ -1787,6 +1838,11 @@ X264=(-c:v libx264 -pix_fmt yuv420p -crf 19)
 
 # Different frame size (must be blocked when mixed with the others).
 "${FF[@]}" -f lavfi -i testsrc2=size=320x180:rate=24:duration=2 "${X264[@]}" "$OUT/small24.mp4"
+
+# Decoder-failure fixture: moov first, then cut the media data at 60 %.
+"${FF[@]}" -i "$OUT/c48.mp4" -c copy -movflags +faststart "$OUT/c48_fs.mp4"
+SIZE=$(stat -f%z "$OUT/c48_fs.mp4")
+head -c $((SIZE * 6 / 10)) "$OUT/c48_fs.mp4" > "$OUT/c48_trunc.mp4"
 
 echo "✓ fixtures in $OUT"
 ```
@@ -1997,7 +2053,7 @@ git commit -m "feat(core): ClipProbe reads exact frame timing; dev fixture scrip
 
 **Interfaces:**
 - Consumes: `Rational`, `ClipProbeError`.
-- Produces: `public struct CadenceReport { frameCount, videoDuration, issues, ok }`, `public enum CadenceValidator { cadenceIssues(pts:videoEnd:frameDuration:expectedFrames:) -> [String]; mixedIssues(frameCount:expectedFrames:duration:expectedDuration:) -> [String]; audioIssues(firstAudioPTS:audioEnd:videoEnd:sampleRate:) -> [String]; validate(url:frameDuration:expectedFrames:expectedDuration:audioSampleRate:) async throws -> CadenceReport }`.
+- Produces: `public struct CadenceReport { frameCount, videoDuration, issues, ok }`, `public enum CadenceValidator { cadenceIssues(pts:durations:videoEnd:frameDuration:expectedFrames:) -> [String]; mixedIssues(frameCount:expectedFrames:duration:expectedDuration:) -> [String]; audioIssues(firstAudioPTS:audioEnd:videoEnd:sampleRate:) -> [String]; validate(url:frameDuration:expectedFrames:expectedDuration:audioSampleRate:) async throws -> CadenceReport }`.
 
 - [ ] **Step 1: Write the failing checks**
 
@@ -2010,19 +2066,34 @@ import SlateCore
 func runValidatorChecks() async {
     let d = Rational(1, 24)
     let perfect = (0..<48).map { d * $0 }
+    let perfectDur = Array(repeating: d, count: 48)
 
-    check("validator: a perfect grid has no issues") {
-        expect(CadenceValidator.cadenceIssues(pts: perfect, videoEnd: Rational(2), frameDuration: d, expectedFrames: 48).isEmpty)
+    func issues(_ pts: [Rational], _ durs: [Rational], end: Rational = Rational(2)) -> [String] {
+        CadenceValidator.cadenceIssues(pts: pts, durations: durs, videoEnd: end, frameDuration: d, expectedFrames: 48)
     }
 
-    check("validator: shifted, missing and short-last frames are reported") {
+    check("validator: a perfect grid has no issues") {
+        expect(issues(perfect, perfectDur).isEmpty)
+    }
+
+    check("validator: shifted, missing frames and a short track end are reported") {
         var shifted = perfect
         shifted[10] = shifted[10] + Rational(1, 12288)
-        expect(!CadenceValidator.cadenceIssues(pts: shifted, videoEnd: Rational(2), frameDuration: d, expectedFrames: 48).isEmpty)
-        let missing = Array(perfect.dropLast())
-        expect(!CadenceValidator.cadenceIssues(pts: missing, videoEnd: Rational(2), frameDuration: d, expectedFrames: 48).isEmpty)
-        expect(!CadenceValidator.cadenceIssues(pts: perfect, videoEnd: Rational(2) - Rational(1, 100),
-                                               frameDuration: d, expectedFrames: 48).isEmpty)
+        expect(!issues(shifted, perfectDur).isEmpty)
+        expect(!issues(Array(perfect.dropLast()), Array(perfectDur.dropLast())).isEmpty)
+        expect(!issues(perfect, perfectDur, end: Rational(2) - Rational(1, 100)).isEmpty)
+    }
+
+    check("validator: a wrong middle or final sample duration is reported with perfect pts and track end") {
+        var middle = perfectDur
+        middle[20] = Rational(1, 48)
+        expect(!issues(perfect, middle).isEmpty, "middle duration")
+        var final = perfectDur
+        final[47] = Rational(1, 48)
+        expect(!issues(perfect, final).isEmpty, "final duration")
+        var zero = perfectDur
+        zero[5] = .zero
+        expect(!issues(perfect, zero).isEmpty, "missing duration")
     }
 
     check("validator: audio start and end within one AAC packet") {
@@ -2076,12 +2147,17 @@ public struct CadenceReport: Equatable {
 }
 
 public enum CadenceValidator {
-    /// Constant mode: frame n at exactly n·d, every frame lasts d, count as planned.
-    public static func cadenceIssues(pts: [Rational], videoEnd: Rational, frameDuration d: Rational,
-                                     expectedFrames: Int) -> [String] {
+    /// Constant mode: frame n at exactly n·d, every sample duration exactly d
+    /// (including the last), count as planned, and the track ends at the last frame's end.
+    /// `durations[i]` is the reported duration of the frame at `pts[i]`.
+    public static func cadenceIssues(pts: [Rational], durations: [Rational], videoEnd: Rational,
+                                     frameDuration d: Rational, expectedFrames: Int) -> [String] {
         var issues: [String] = []
         if pts.count != expectedFrames {
             issues.append("frame count \(pts.count), expected \(expectedFrames)")
+        }
+        if durations.count != pts.count {
+            issues.append("\(durations.count) durations for \(pts.count) frames")
         }
         var bad = 0
         for (n, p) in pts.enumerated() where p != d * n {
@@ -2089,8 +2165,14 @@ public enum CadenceValidator {
             bad += 1
         }
         if bad > 5 { issues.append("\(bad - 5) more frames off the grid") }
+        var badDur = 0
+        for (n, dur) in durations.enumerated() where dur != d {
+            if badDur < 5 { issues.append("frame \(n) lasts \(dur), expected \(d)") }
+            badDur += 1
+        }
+        if badDur > 5 { issues.append("\(badDur - 5) more frames with a wrong duration") }
         if let last = pts.last, videoEnd - last != d {
-            issues.append("last frame lasts \(videoEnd - last), expected \(d)")
+            issues.append("track ends \(videoEnd - last) after the last frame, expected \(d)")
         }
         return issues
     }
@@ -2140,7 +2222,8 @@ public enum CadenceValidator {
 
         var issues: [String] = []
         if let d = frameDuration {
-            issues += cadenceIssues(pts: pts, videoEnd: videoEnd, frameDuration: d, expectedFrames: expectedFrames)
+            issues += cadenceIssues(pts: pts, durations: try await frameDurations(asset: asset, track: videoTrack, decoded: video),
+                                    videoEnd: videoEnd, frameDuration: d, expectedFrames: expectedFrames)
         } else {
             issues += mixedIssues(frameCount: pts.count, expectedFrames: expectedFrames,
                                   duration: videoEnd - (pts.first ?? .zero), expectedDuration: expectedDuration)
@@ -2159,6 +2242,20 @@ public enum CadenceValidator {
             }
         }
         return CadenceReport(frameCount: pts.count, videoDuration: videoEnd, issues: issues)
+    }
+
+    /// Duration of each decoded frame. Uses the decoder's durations when every one is
+    /// reported. Otherwise uses the sample table (an independent source), matched by pts.
+    /// A frame with no duration in either source gets 0, which the check reports.
+    static func frameDurations(asset: AVAsset, track: AVAssetTrack,
+                               decoded: [(pts: Rational, duration: Rational)]) async throws -> [Rational] {
+        if decoded.allSatisfy({ $0.duration > .zero }) {
+            return decoded.map(\.duration)
+        }
+        let table = try await ClipProbe.readFrameTable(asset: asset, track: track)
+        var byPTS: [Rational: Rational] = [:]
+        for (p, d) in zip(table.pts, table.durations) { byPTS[p] = d }
+        return decoded.map { byPTS[$0.pts] ?? .zero }
     }
 
     static func decodedTimes(asset: AVAsset, track: AVAssetTrack,
@@ -2189,7 +2286,7 @@ public enum CadenceValidator {
 - [ ] **Step 4: Run to verify it passes**
 
 Run: `swift run SlateChecks validator`
-Expected: `5 passed, 0 failed, 0 skipped`.
+Expected: `6 passed, 0 failed, 0 skipped`.
 
 If the fixture check fails only on the audio end (ffmpeg `-shortest` can cut audio by more than one packet), print the issue. Then regenerate `c24_a.mp4` without `-shortest` and with `-t 5` on the sine input. Do not loosen the tolerance.
 
@@ -2425,6 +2522,29 @@ func runReencoderChecks() async {
         expectEqual(report.frameCount, 120)
     }
 
+    await checkAsync("reencoder: a truncated source fails instead of freezing, and leaves no output") {
+        // Frame table from the intact file; media data from the cut copy.
+        let good = try await loadClip("c48_fs.mp4", keep: [(0, 4.9)])
+        let d = Rational(1, 24)
+        let plan = ExportPlanner.plan(Project(clips: [good], fpsMode: .constant(frameDuration: d)))
+        let job = try await ReencodeJob.load(asset: AVURLAsset(url: try fixture("c48_trunc.mp4")),
+                                             frames: good.media!.frames, segments: plan.grid)
+        let out = try checksOutputDirectory().appendingPathComponent("re-trunc.mp4")
+        do {
+            try await ClipReencoder().encode(jobs: [job], frameDuration: d, timescale: plan.outputTimescale,
+                                             video: .matching(good.media!), audio: nil,
+                                             outputURL: out, progress: { _ in })
+            expect(false, "expected a decode error, got a successful (frozen) export")
+        } catch ReencodeError.missingFrame {
+            // expected
+        } catch ReencodeError.readerFailed {
+            // expected
+        } catch ReencodeError.cannotStartReader {
+            // expected
+        }
+        expect(!FileManager.default.fileExists(atPath: out.path), "partial output must be removed")
+    }
+
     await checkAsync("reencoder: cancel throws cancelled") {
         let clip = try await loadClip("c48.mp4", keep: [(0, 4.9)])
         let plan = ExportPlanner.plan(Project(clips: [clip], fpsMode: .constant(frameDuration: Rational(1, 24))))
@@ -2465,7 +2585,9 @@ public enum ReencodeError: Error, LocalizedError {
     case cannotStartWriter(String)
     case cannotStartReader(String)
     case writerFailed(String)
+    case readerFailed(String)
     case audioFailed(OSStatus)
+    case audioTruncated(samples: Int64)
     case missingFrame
     case cancelled
 
@@ -2473,6 +2595,8 @@ public enum ReencodeError: Error, LocalizedError {
         switch self {
         case .cannotStartWriter(let m): return "Could not start the encoder: \(m)"
         case .cannotStartReader(let m): return "Could not read a clip: \(m)"
+        case .readerFailed(let m): return "Reading a clip failed: \(m)"
+        case .audioTruncated(let n): return "A clip's audio ends \(n) samples early."
         case .writerFailed(let m): return "Encoding failed: \(m)"
         case .audioFailed(let s): return "Audio processing failed (\(s))."
         case .missingFrame: return "A source frame could not be decoded."
@@ -2699,16 +2823,31 @@ final class VideoFrameSource {
         return false
     }
 
-    /// Read forward until the decoded frame is the wanted source frame.
-    /// If the source runs out, the last decoded frame is held.
+    /// Read forward until the decoded frame is exactly the wanted source frame.
+    /// A frame is shown again only when the retimer picks the same index again.
+    /// A failed, cancelled or early-ending reader, or a skipped frame, is an error.
     private func advance(to want: Int, frames: FrameTable) throws {
         while currentIndex < want {
-            guard let buffer = output?.copyNextSampleBuffer() else { return }
+            guard let buffer = output?.copyNextSampleBuffer() else {
+                try throwIfReaderFailed(reader)
+                throw ReencodeError.missingFrame
+            }
             guard let image = CMSampleBufferGetImageBuffer(buffer) else { continue }
             let pts = Rational(CMSampleBufferGetPresentationTimeStamp(buffer))
             current = image
-            currentIndex = frames.lastFrameIndex(atOrBefore: pts) ?? 0
+            currentIndex = frames.lastFrameIndex(atOrBefore: pts) ?? -1
         }
+        if currentIndex != want { throw ReencodeError.missingFrame }
+    }
+}
+
+/// Turns a reader that stopped for a bad reason into an error. Normal completion returns.
+func throwIfReaderFailed(_ reader: AVAssetReader?) throws {
+    guard let reader else { return }
+    switch reader.status {
+    case .failed: throw ReencodeError.readerFailed(reader.error?.localizedDescription ?? "unknown")
+    case .cancelled: throw ReencodeError.cancelled
+    default: return
     }
 }
 
@@ -2753,7 +2892,16 @@ final class AudioSampleSource {
         while pieceIndex < pieces.count {
             let piece = pieces[pieceIndex]
             if output == nil { try open(piece) }
-            guard emitted < piece.count, let buffer = output?.copyNextSampleBuffer() else {
+            if emitted >= piece.count {
+                closePiece()
+                continue
+            }
+            guard let buffer = output?.copyNextSampleBuffer() else {
+                try throwIfReaderFailed(reader)
+                // Normal end of the source audio. Allow it to be short by at most one
+                // AAC packet (ffmpeg `-shortest` files); anything more is truncation.
+                let shortfall = piece.count - emitted
+                if shortfall > 1024 { throw ReencodeError.audioTruncated(samples: shortfall) }
                 closePiece()
                 continue
             }
@@ -2831,7 +2979,7 @@ final class AudioSampleSource {
 - [ ] **Step 4: Run to verify it passes**
 
 Run: `swift run SlateChecks reencoder`
-Expected: `3 passed, 0 failed, 0 skipped`.
+Expected: `4 passed, 0 failed, 0 skipped`.
 
 If a cadence check fails with frames off the grid, print the first 5 decoded pts and the output track's `timeRange`. Check that `writer.movieTimeScale` and `videoInput.mediaTimeScale` equal the plan's timescale. Do not add a tolerance to the validator.
 
@@ -2861,6 +3009,7 @@ Create `Sources/SlateChecks/ExporterChecks.swift`:
 
 ```swift
 import Foundation
+import CoreMedia
 import SlateCore
 
 private func exportProject(_ project: Project, name: String) async throws -> (CadenceReport, ExportPlan) {
@@ -2936,13 +3085,54 @@ func runExporterChecks() async {
         expect(FileManager.default.fileExists(atPath: a.url.path), "source must survive")
     }
 
-    await checkAsync("exporter: cancel during re-encode leaves no temp or output files") {
+    await checkAsync("exporter: a symlinked parent or a case alias of a source is refused") {
+        let fm = FileManager.default
+        let base = try checksOutputDirectory().appendingPathComponent("alias-test", isDirectory: true)
+        try? fm.removeItem(at: base)
+        let real = base.appendingPathComponent("real", isDirectory: true)
+        try fm.createDirectory(at: real, withIntermediateDirectories: true)
+        let realClip = real.appendingPathComponent("clip.mp4")
+        try fm.copyItem(at: try fixture("c24.mp4"), to: realClip)
+        let alias = base.appendingPathComponent("alias")
+        try fm.createSymbolicLink(at: alias, withDestinationURL: real)
+        let media = try await ClipProbe.probe(url: realClip)
+        let whole = [Segment(range: CMTimeRange(start: .zero, duration: CMTime(value: 1, timescale: 1)))]
+
+        // Input through the symlink, output through the real path.
+        let viaAlias = Clip(url: alias.appendingPathComponent("clip.mp4"), segments: whole, media: media)
+        do {
+            _ = try await ProjectExporter().export(project: Project(clips: [viaAlias]), outputURL: realClip,
+                                                   tempDirectory: base, progress: { _ in })
+            expect(false, "symlink parent not detected")
+        } catch ProjectExportError.outputIsSource {
+            // expected
+        }
+        expect(fm.fileExists(atPath: realClip.path), "source must survive (symlink case)")
+
+        // Case alias, only meaningful on a case-insensitive volume.
+        let caseSensitive = (try? real.resourceValues(forKeys: [.volumeSupportsCaseSensitiveNamesKey]))?
+            .volumeSupportsCaseSensitiveNames ?? true
+        if !caseSensitive {
+            let direct = Clip(url: realClip, segments: whole, media: media)
+            do {
+                _ = try await ProjectExporter().export(project: Project(clips: [direct]),
+                                                       outputURL: real.appendingPathComponent("CLIP.MP4"),
+                                                       tempDirectory: base, progress: { _ in })
+                expect(false, "case alias not detected")
+            } catch ProjectExportError.outputIsSource {
+                // expected
+            }
+            expect(fm.fileExists(atPath: realClip.path), "source must survive (case alias)")
+        }
+    }
+
+    await checkAsync("exporter: cancel during re-encode leaves no temp files and keeps an existing export") {
         let a = try await loadClip("c48.mp4", keep: [(0, 4.9)])
         let temp = try checksOutputDirectory().appendingPathComponent("tmp-cancel", isDirectory: true)
         try? FileManager.default.removeItem(at: temp)
         try FileManager.default.createDirectory(at: temp, withIntermediateDirectories: true)
         let out = try checksOutputDirectory().appendingPathComponent("ex-cancel.mp4")
-        try? FileManager.default.removeItem(at: out)
+        try Data("previous export".utf8).write(to: out)
         let exporter = ProjectExporter()
         let task = Task {
             try await exporter.export(project: Project(clips: [a], fpsMode: d24), outputURL: out,
@@ -2958,7 +3148,9 @@ func runExporterChecks() async {
         }
         let leftovers = try FileManager.default.contentsOfDirectory(atPath: temp.path)
         expect(leftovers.isEmpty, "leftovers: \(leftovers)")
-        expect(!FileManager.default.fileExists(atPath: out.path))
+        expectEqual(try String(contentsOf: out, encoding: .utf8), "previous export")
+        let siblings = try FileManager.default.contentsOfDirectory(atPath: out.deletingLastPathComponent().path)
+        expect(!siblings.contains { $0.hasPrefix(".slate-") }, "staging file left next to the output")
     }
 }
 ```
@@ -3025,8 +3217,7 @@ public final class ProjectExporter: @unchecked Sendable {
                        progress: @escaping @Sendable (ExportStage) -> Void) async throws -> CadenceReport {
         let plan = ExportPlanner.plan(project)
         guard plan.canExport else { throw ProjectExportError.blocked(plan.blockers) }
-        let output = outputURL.standardizedFileURL
-        if project.clips.contains(where: { $0.url.standardizedFileURL == output }) {
+        if Self.outputCollides(outputURL, with: project.clips.map(\.url)) {
             throw ProjectExportError.outputIsSource
         }
 
@@ -3034,19 +3225,58 @@ public final class ProjectExporter: @unchecked Sendable {
         try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: work) }
 
+        // Render and validate a staged file. The destination is touched only after
+        // success, so a failed or cancelled export keeps any existing file there.
+        let staged = work.appendingPathComponent("render.mp4")
         do {
-            try? FileManager.default.removeItem(at: output)
-            try await render(plan: plan, project: project, output: output, work: work, progress: progress)
+            try await render(plan: plan, project: project, output: staged, work: work, progress: progress)
             if isCancelled { throw ProjectExportError.cancelled }
             progress(.validating)
-            return try await CadenceValidator.validate(url: output, frameDuration: plan.frameDuration,
-                                                       expectedFrames: plan.totalFrames,
-                                                       expectedDuration: plan.totalDuration,
-                                                       audioSampleRate: plan.audio?.sampleRate)
+            let report = try await CadenceValidator.validate(url: staged, frameDuration: plan.frameDuration,
+                                                             expectedFrames: plan.totalFrames,
+                                                             expectedDuration: plan.totalDuration,
+                                                             audioSampleRate: plan.audio?.sampleRate)
+            if isCancelled { throw ProjectExportError.cancelled }
+            try Self.install(staged, at: outputURL)
+            return report
         } catch {
-            try? FileManager.default.removeItem(at: output)
             if isCancelled || error is CancellationError { throw ProjectExportError.cancelled }
             if case ReencodeError.cancelled = error { throw ProjectExportError.cancelled }
+            throw error
+        }
+    }
+
+    /// True if `output` is (or would overwrite) one of the sources: same resolved path
+    /// after following symlinks, or the same file identity (case aliases, hard links).
+    static func outputCollides(_ output: URL, with sources: [URL]) -> Bool {
+        let out = output.resolvingSymlinksInPath().standardizedFileURL
+        let outID = try? out.resourceValues(forKeys: [.fileResourceIdentifierKey]).fileResourceIdentifier
+        for source in sources {
+            let src = source.resolvingSymlinksInPath().standardizedFileURL
+            if src.path == out.path { return true }
+            if let outID,
+               let srcID = try? src.resourceValues(forKeys: [.fileResourceIdentifierKey]).fileResourceIdentifier,
+               outID.isEqual(srcID) {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Move the staged file next to the destination (same volume), then swap it in.
+    static func install(_ staged: URL, at destination: URL) throws {
+        let fm = FileManager.default
+        let sibling = destination.deletingLastPathComponent()
+            .appendingPathComponent(".slate-\(UUID().uuidString).mp4")
+        try fm.moveItem(at: staged, to: sibling)
+        do {
+            if fm.fileExists(atPath: destination.path) {
+                _ = try fm.replaceItemAt(destination, withItemAt: sibling)
+            } else {
+                try fm.moveItem(at: sibling, to: destination)
+            }
+        } catch {
+            try? fm.removeItem(at: sibling)
             throw error
         }
     }
@@ -3067,11 +3297,9 @@ public final class ProjectExporter: @unchecked Sendable {
                                                        frames: clips[cp.clipID]!.media!.frames,
                                                        segments: cp.segments))
             }
-            let tmp = work.appendingPathComponent("all.mp4")
-            try await reencode(jobs, d: d, plan: plan, reference: reference, to: tmp) { p in
+            try await reencode(jobs, d: d, plan: plan, reference: reference, to: output) { p in
                 progress(.reencoding(clip: 1, of: 1, progress: p))
             }
-            try FileManager.default.moveItem(at: tmp, to: output)
             return
         }
 
@@ -3156,7 +3384,7 @@ public final class ProjectExporter: @unchecked Sendable {
 - [ ] **Step 4: Run to verify it passes**
 
 Run: `swift run SlateChecks exporter`
-Expected: `7 passed, 0 failed, 0 skipped`.
+Expected: `8 passed, 0 failed, 0 skipped`.
 
 A failure in "constant 24 selective" while "re-encode all" passes is a real Phase 0 finding. It is NOT a bug to hide. Record the issues text and continue to Task 13. The spec's decision rule decides what happens next.
 
@@ -3184,7 +3412,7 @@ git commit -m "feat(core): ProjectExporter for mixed, selective and re-encode-al
 
 **Interfaces:**
 - Consumes: `ProjectExporter`, `loadClip`, `ExportPlanner`.
-- Produces: `enum Phase0 { static func run() async -> Int32 }` and the subcommand `swift run SlateChecks phase0`.
+- Produces: `enum Phase0 { static func run(arguments:) async -> Int32 }` and the subcommand `swift run SlateChecks phase0 [--clip24 <path> --clip48 <path>]`.
 
 - [ ] **Step 1: Write the Phase 0 command**
 
@@ -3192,6 +3420,7 @@ Create `Sources/SlateChecks/Phase0.swift`:
 
 ```swift
 import Foundation
+import CoreMedia
 import SlateCore
 
 /// Writes the Phase 0 files into build/phase0 and prints an automatic report.
@@ -3203,7 +3432,32 @@ enum Phase0 {
         let audio: Bool
     }
 
-    static func run() async -> Int32 {
+    /// Arguments: optional `--clip24 <path> --clip48 <path>` to run the video-only cases
+    /// on the user's own clips, locally. Paths are never copied into the repo.
+    static func run(arguments: [String]) async -> Int32 {
+        func value(_ flag: String) -> String? {
+            guard let i = arguments.firstIndex(of: flag), i + 1 < arguments.count else { return nil }
+            return arguments[i + 1]
+        }
+        let real24 = value("--clip24")
+        let real48 = value("--clip48")
+        if (real24 == nil) != (real48 == nil) {
+            print("Pass both --clip24 and --clip48, or neither.")
+            return 2
+        }
+        let usingRealClips = real24 != nil
+
+        func load(_ generated: String, real: String?, keep: [(Double, Double)]) async throws -> Clip {
+            guard let real else { return try await loadClip(generated, keep: keep) }
+            let url = URL(fileURLWithPath: (real as NSString).expandingTildeInPath)
+            let media = try await ClipProbe.probe(url: url)
+            let segments = keep.map { r in
+                Segment(range: CMTimeRangeFromTimeToTime(start: CMTime(seconds: r.0, preferredTimescale: 600),
+                                                         end: CMTime(seconds: r.1, preferredTimescale: 600)))
+            }
+            return Clip(url: url, segments: segments, media: media)
+        }
+
         let d24 = FPSMode.constant(frameDuration: Rational(1, 24))
         let d48 = FPSMode.constant(frameDuration: Rational(1, 48))
         let cases = [
@@ -3221,11 +3475,14 @@ enum Phase0 {
         var failures = 0
         do {
             try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
-            print("Phase 0 → \(outDir.path)\n")
+            print("Phase 0 → \(outDir.path)  (video-only cases: \(usingRealClips ? "user clips" : "generated fixtures"))\n")
             for c in cases {
                 // Both clips are cut mid-GOP (the fixtures have one keyframe at 0).
-                let a = try await loadClip(c.audio ? "c24_a.mp4" : "c24.mp4", keep: [(0.7, 2.3), (3.1, 4.4)])
-                let b = try await loadClip(c.audio ? "c48_a.mp4" : "c48.mp4", keep: [(1.05, 3.6)])
+                // Audio cases always use the generated fixtures (supplemental AAC coverage).
+                let a = try await load(c.audio ? "c24_a.mp4" : "c24.mp4", real: c.audio ? nil : real24,
+                                       keep: [(0.7, 2.3), (3.1, 4.4)])
+                let b = try await load(c.audio ? "c48_a.mp4" : "c48.mp4", real: c.audio ? nil : real48,
+                                       keep: [(1.05, 3.6)])
                 let project = Project(clips: [a, b], fpsMode: c.mode, constantStrategy: c.strategy)
                 let plan = ExportPlanner.plan(project)
                 let actions = plan.clips.map { "\($0.action)" }.joined(separator: ", ")
@@ -3257,7 +3514,7 @@ At the top of `main.swift`, right after `let arguments = …`, add:
 
 ```swift
 if arguments.first == "phase0" {
-    exit(await Phase0.run())
+    exit(await Phase0.run(arguments: Array(arguments.dropFirst())))
 }
 ```
 
@@ -3294,18 +3551,28 @@ scripts/phase0-ffprobe.sh
 
 Expected: 7 lines, each `PASS` or `FAIL`. For `*-24*` files, ffprobe shows `r_frame_rate=24/1` and ONE frame-duration value. For `*-48*` files, ffprobe shows `48/1` and one value. For `phase0-mixed.mp4`, ffprobe shows two duration values (VFR), which is expected.
 
-- [ ] **Step 4: Optional manual check in DaVinci Resolve**
+- [ ] **Step 4: Offer the user's own checks (both optional, both local)**
 
-Ask the user (in their language, short): "Phase 0 files are in `build/phase0/`. If you have 2 minutes: import them into DaVinci Resolve. For each file, check the clip fps, look at the joins for extra, missing, black or frozen frames, and check audio sync on the `-audio` files. Or skip this." Wait for the answer. If the user skips, record "Resolve check skipped".
+The user decided on 2026-09-29 that their clips are private and that the Resolve check is optional. Respect that. Do not ask for the files. Ask the user (in their language, short):
+
+1. "If you want, run Phase 0 on two of your own clips on your machine: `swift run SlateChecks phase0 --clip24 <path> --clip48 <path>`. The files stay on your machine."
+2. "If you have 2 minutes: import `build/phase0/*.mp4` into DaVinci Resolve. Check the fps, the joins (no extra, missing, black or frozen frames), and audio sync on the `-audio` files."
+
+Wait for the answer. Either can be skipped.
 
 - [ ] **Step 5: Record the decision**
 
-Apply the spec's rule:
-- Selective passes the automatic checks (and Resolve, if checked) → Selective is the Constant-mode default.
+Apply the spec's rule to what was actually run:
+- Selective passes → Selective is the Constant-mode default.
 - Selective fails, Re-encode all passes → Re-encode all is the default, and Selective stays as an option.
 - Both fail → STOP. Report to the user and revisit the design before Plan 2.
 
-Add a dated entry under `## Done` in `MASTER_PLAN.md` (on disk only; the file is gitignored). Include the 7 result lines, the ffprobe summary, the Resolve result or "skipped", and the chosen default. Update the File Map with the new `Sources/SlateCore/`, `Sources/SlateChecks/`, and `scripts/` files. Under `## Next`, add: "Write Plan 2 (UI: clip strip, per-clip timeline, Clip/Project player, `.slate` file, autosave, export sheet) from the spec."
+Record the evidence level honestly. Never write "NLE gate passed" unless the user reported a Resolve result:
+- Resolve checked by the user → "NLE compatibility: verified in DaVinci Resolve (<date>)".
+- Resolve skipped → "NLE compatibility: UNVERIFIED (user skipped the Resolve check). Default chosen from automatic checks only." Plan 2 may start, because the user chose this. The export sheet in Plan 2 then must show "Re-encode everything — max compatibility" prominently in Constant mode.
+- Real clips run by the user → name them only as "user clips (local)". Otherwise write "generated fixtures only".
+
+Add a dated entry under `## Done` in `MASTER_PLAN.md` (on disk only; the file is gitignored). Include the 7 result lines, the ffprobe summary, the evidence level above, and the chosen default. Update the File Map with the new `Sources/SlateCore/`, `Sources/SlateChecks/`, and `scripts/` files. Under `## Next`, add: "Write Plan 2 (UI: clip strip, per-clip timeline, Clip/Project player, `.slate` file, autosave, export sheet) from the spec."
 
 - [ ] **Step 6: Commit**
 

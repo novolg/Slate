@@ -309,6 +309,18 @@ Delete temp files on success, failure, and cancel.
   cadence check. Mixed mode checks frame count and total duration. A mismatch
   shows a warning with details.
 
+### Output safety
+
+- The export refuses an output path that is a source clip. Paths are compared
+  after resolving symlinks, and existing files by file identity, so symlinked
+  folders, case aliases, and hard links are caught.
+- The export renders and validates a staged file in the temp folder. Only after
+  success does it replace the destination. A failed or cancelled export leaves
+  an existing file at the destination unchanged.
+- Decoder failures are errors. A frame is repeated only when the retimer picks
+  the same source frame again, never because the reader stopped early. Source
+  audio may be short by at most one AAC packet.
+
 ### Unchanged
 
 Cuts may sit mid-GOP. Passthrough keeps the whole GOP and hides the extra
@@ -336,11 +348,15 @@ The NLE use case is a real requirement, so it is tested first.
 2. Automatic checks: `CadenceValidator` plus
    `ffprobe -show_frames` (ffprobe is installed at `/opt/homebrew/bin` for
    development only; it is not bundled).
+   The command also takes `--clip24 <path> --clip48 <path>`, so the user can
+   run the video-only cases on their own clips locally. The files never leave
+   their machine.
 3. Optional manual check by the user in DaVinci Resolve (about 2 minutes):
    import each file and confirm the fps, no extra or missing frames at the
    joins, no black or frozen frames, and audio in sync. If the user skips it,
    Selective becomes the default based on the automatic checks alone, and
-   "Re-encode everything" stays available as the fallback.
+   "Re-encode everything" stays available as the fallback. The record then
+   says "NLE compatibility: UNVERIFIED", never "passed".
 4. Decision, recorded in `MASTER_PLAN.md`:
    - Selective passes → Selective is the default.
    - Selective fails, Re-encode all passes → Re-encode all is the default.
