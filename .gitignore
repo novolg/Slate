@@ -17,3 +17,6 @@ MASTER_PLAN.md
 
 # Claude Code worktrees
 .claude/worktrees/
+
+# Superpowers SDD scratch
+.superpowers/
