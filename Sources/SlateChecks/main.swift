@@ -12,5 +12,6 @@ runRetimerChecks()
 runTimeMapChecks()
 await runProbeChecks()
 await runValidatorChecks()
+await runCompositionChecks()
 
 Harness.finish()

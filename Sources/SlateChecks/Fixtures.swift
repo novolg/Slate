@@ -1,4 +1,6 @@
 import Foundation
+import CoreMedia
+import SlateCore
 
 /// URL of a generated fixture. Skips the check when fixtures were not generated.
 func fixture(_ name: String) throws -> URL {
@@ -16,4 +18,15 @@ func checksOutputDirectory() throws -> URL {
         .appendingPathComponent("build/checks-out", isDirectory: true)
     try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
     return url
+}
+
+/// Probe a fixture and keep the given second ranges.
+func loadClip(_ name: String, keep: [(Double, Double)]) async throws -> Clip {
+    let url = try fixture(name)
+    let media = try await ClipProbe.probe(url: url)
+    let segments = keep.map { r in
+        Segment(range: CMTimeRangeFromTimeToTime(start: CMTime(seconds: r.0, preferredTimescale: 600),
+                                                 end: CMTime(seconds: r.1, preferredTimescale: 600)))
+    }
+    return Clip(url: url, segments: segments, media: media)
 }
