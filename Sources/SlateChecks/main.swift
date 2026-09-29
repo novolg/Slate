@@ -5,5 +5,6 @@ Harness.filter = arguments.first
 
 runSegmentChecks()
 runRationalChecks()
+runFrameTableChecks()
 
 Harness.finish()
