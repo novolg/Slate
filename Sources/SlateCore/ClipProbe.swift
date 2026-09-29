@@ -40,10 +40,49 @@ public enum ClipProbe {
                          codec: codec, nominalFPS: Double(fps), estimatedDataRate: rate, audio: audio)
     }
 
+    /// One edit segment's media-timeline (source) to track-timeline (target) time mapping,
+    /// in `Rational`. Only non-empty segments with a 1:1 rate (source and target durations
+    /// equal) are supported.
+    private struct EditMapping {
+        let sourceStart: Rational
+        let sourceEnd: Rational
+        let targetStart: Rational
+    }
+
     /// Every video sample's presentation time and duration, sorted by pts.
-    /// Only samples inside the track's time range (after edit lists) are kept.
+    ///
+    /// `AVAssetReaderTrackOutput` passthrough (outputSettings: nil) reports each sample's
+    /// presentation time in the track's *media* timeline. When the file has an edit list
+    /// (elst) — for example because B-frames gave the encoder's first packets a negative
+    /// DTS — that media timeline is not the same as the *track* timeline that
+    /// `AVMutableCompositionTrack.insertTimeRange` and a decoded `AVAssetReaderTrackOutput`
+    /// (with pixel-format outputSettings) both use. Each sample must be mapped through the
+    /// track's edit segments before it means anything as a frame table; samples the edit
+    /// list hides (matching no segment) are dropped.
+    /// Only samples inside the track's time range are kept.
     public static func readFrameTable(asset: AVAsset, track: AVAssetTrack) async throws -> FrameTable {
-        let (timescale, trackRange) = try await track.load(.naturalTimeScale, .timeRange)
+        let (timescale, trackRange, segments) = try await track.load(.naturalTimeScale, .timeRange, .segments)
+        let mappings: [EditMapping] = try segments.compactMap { segment in
+            guard !segment.isEmpty else { return nil }
+            let mapping = segment.timeMapping
+            let sourceStart = Rational(mapping.source.start)
+            let sourceEnd = Rational(mapping.source.end)
+            let targetStart = Rational(mapping.target.start)
+            let targetEnd = Rational(mapping.target.end)
+            guard (sourceEnd - sourceStart) == (targetEnd - targetStart) else {
+                throw ClipProbeError.readerFailed("scaled edit segments are not supported")
+            }
+            return EditMapping(sourceStart: sourceStart, sourceEnd: sourceEnd, targetStart: targetStart)
+        }
+
+        /// Media-timeline pts -> track-timeline pts, or nil if hidden by the edit list.
+        func mapToTrackTime(_ p: Rational) -> Rational? {
+            for m in mappings where p >= m.sourceStart && p < m.sourceEnd {
+                return m.targetStart + (p - m.sourceStart)
+            }
+            return nil
+        }
+
         let reader = try AVAssetReader(asset: asset)
         let output = AVAssetReaderTrackOutput(track: track, outputSettings: nil)
         output.alwaysCopiesSampleData = false
@@ -73,11 +112,17 @@ public enum ClipProbe {
                 guard info.presentationTimeStamp.isNumeric, info.duration.isNumeric else { continue }
                 let d = Rational(info.duration)
                 for k in 0..<samples {
-                    entries.append((Rational(info.presentationTimeStamp) + d * k, d))
+                    let p = Rational(info.presentationTimeStamp) + d * k
+                    if let mapped = mapToTrackTime(p) {
+                        entries.append((mapped, d))
+                    }
                 }
             } else {
                 for info in infos where info.presentationTimeStamp.isNumeric && info.duration.isNumeric {
-                    entries.append((Rational(info.presentationTimeStamp), Rational(info.duration)))
+                    let p = Rational(info.presentationTimeStamp)
+                    if let mapped = mapToTrackTime(p) {
+                        entries.append((mapped, Rational(info.duration)))
+                    }
                 }
             }
         }

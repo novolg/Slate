@@ -8,11 +8,7 @@ OUT="$ROOT/build/fixtures"
 mkdir -p "$OUT"
 
 FF=(ffmpeg -loglevel error -y)
-# -bf 0: no B-frames. Default libx264 B-frames give the first packets negative DTS,
-# which forces an edit list (elst); AVFoundation's passthrough sample times then read
-# in the pre-edit media timeline, so pts 0 is not the first displayed frame. CFR test
-# fixtures need pts 0 == frame 0 with no edit-list offset.
-X264=(-c:v libx264 -pix_fmt yuv420p -crf 19 -bf 0)
+X264=(-c:v libx264 -pix_fmt yuv420p -crf 19)
 
 # 24 fps, 5 s, with AAC audio (default GOP: one keyframe at the start).
 "${FF[@]}" -f lavfi -i testsrc2=size=640x360:rate=24:duration=5 \
