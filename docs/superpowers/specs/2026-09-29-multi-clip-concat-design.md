@@ -1,8 +1,7 @@
 # Multi-clip concat — design
 
 Date: 2026-09-29
-Status: revised after external review (frame grid, time mapping, auto
-segment, project-mode editing, Phase 0 NLE gate); awaiting user review
+Status: external review passed (no blocking findings); awaiting user approval
 
 ## Goal
 
@@ -85,8 +84,9 @@ status bar.
   Export button.
 - **Clip strip:** horizontal cards. Each card shows thumbnail, index, "kept /
   total" duration (e.g. `3.2 / 5.0 s`), fps badge, audio icon.
-  - fps badge is yellow when the clip will be re-encoded (Constant mode,
-    fps ≠ target).
+  - fps badge is yellow whenever the current `ExportPlan` marks the clip as
+    `reencode`, for any reason: fps differs, frame timing not exact, or
+    "Re-encode all" is on. The tooltip shows the planner's reason.
   - Card is red when the file is missing or its format differs from the rest.
   - Drag a card to reorder. Drop files from Finder into the strip at an
     insertion marker, or anywhere in the window (appends). `[+]` button and
@@ -267,8 +267,9 @@ ends. No gaps and no overlaps.
 
 #### Two strategies, one code path
 
-- **Selective** (default if Phase 0 passes): re-encode only clips whose fps
-  differs from the target, then do a passthrough concat.
+- **Selective** (default if Phase 0 passes): re-encode only clips that fail
+  copy eligibility (not exact CFR, or `srcD ≠ d`), then do a passthrough
+  concat.
 - **Re-encode all** (checkbox in the export sheet: "Re-encode everything —
   max compatibility"): every clip goes through the retimer into **one**
   `AVAssetWriter`. The video track has one encoder session, one parameter
