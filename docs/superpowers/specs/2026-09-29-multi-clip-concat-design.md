@@ -98,13 +98,17 @@ status bar.
   zoom, handles, hotkeys unchanged.
 - **Player mode toggle `Clip / Project`:**
   - Clip: plays the selected clip's full source (for trimming).
-  - Project: plays an `AVMutableComposition` of all kept segments in order
-    (rebuilt on change). A playhead marker moves across the strip. Clicking a
-    card in this mode seeks to that clip's start in the output.
+  - Project: plays an `AVMutableComposition` built from the **same grid
+    segments as the export** (`[s', s' + N · d)` at `O_k`), rebuilt on every
+    change. So joins, card seek positions, and total duration match the
+    output exactly. The only difference: re-encoded clips preview their
+    source frames, so a 48 fps clip in a Constant-24 project previews at 48.
+    Timing is identical. A playhead marker moves across the strip. Clicking
+    a card seeks to that clip's first grid segment `O_k`.
 - **Time domains.** Two clocks exist: *source time* (inside one clip file)
-  and *project time* (inside the assembled output). A pure `ProjectTimeMap`
-  converts between them: project time → (clip, segment, source time), and
-  back.
+  and *project time* (inside the assembled output). A pure `ProjectTimeMap`,
+  built from the planner's grid segments, converts between them: project
+  time → (clip, segment, source time), and back.
   - All edit commands (`I`, `O`, handle drag, segment delete, timeline click)
     work in source time only.
   - Project mode is preview-only. The selection follows the playhead: the
@@ -134,8 +138,14 @@ clip one of `copy`, `reencode(from:to:)`, or `blocked(reason)`. The export
 sheet shows the plan before starting.
 
 Blocking reasons: missing file, frame size ≠ project, codec ≠ project, audio
-presence ≠ project, no kept segments in the whole project. The reference
-format is the first valid clip.
+presence ≠ project, and **zero output frames after quantization**
+(`Σ N_k = 0`, message: "All selections are shorter than one frame"). The
+last check runs after `FrameGrid`, so a project whose only selection is
+10 ms at 24 fps is blocked, not exported empty. The reference format is the
+first valid clip.
+
+The planner is pure and cheap. It re-runs on every edit, and its grid
+segments feed export, Project preview, and `ProjectTimeMap` alike.
 
 ### Mixed mode
 
@@ -151,33 +161,52 @@ frame is presented at exactly `n · d`. Reported nominal fps is not enough.
 
 #### Global frame grid (`FrameGrid`, pure)
 
-- `d` is a rational `CMTime`: `1/24`, `1/48`, `1001/24000` for 23.976, etc.
-  It is taken from the `minFrameDuration` of a clip whose fps equals the
-  target, else built from the target value.
-- Each kept segment `[s, e)` of every clip (copy and re-encode alike) is
-  turned into a **grid segment** `(clip, s', N)`:
-  - `s'` = `s` snapped to the nearest source frame pts of that clip
-    (`p0 + round((s − p0) / srcD) · srcD`, where `p0` is the clip's first
-    frame pts and `srcD` its frame duration).
-  - `N` = `round((e − s) / d)`, clamped so `s' + N · d` does not pass the clip
-    end. Segments with `N = 0` are dropped (the plan lists them as skipped).
+All timing math uses **actual sample timestamps**, never nominal fps or
+`minFrameDuration` (which is only a minimum and may be unknown).
+
+- `ClipProbe` reads every video sample's pts and duration in presentation
+  order (a 5 s clip has ~240 samples; this reuses the `KeyframeScanner`
+  reader pass). It stores `frames: [(pts, duration)]` and the track timescale.
+- **CFR check.** A clip is CFR when every frame duration and every gap between
+  consecutive pts are equal, with a tolerance of 1 tick of the track
+  timescale. Then `srcD` is that common duration. Otherwise the clip is VFR.
+- `d` is a rational `CMTime`. If a CFR clip's `srcD` matches the target, use
+  that exact `srcD` (this handles `1001/24000` for 23.976). Otherwise build
+  `d` from the target value.
+- **Copy eligibility (Constant mode).** A clip is copied only if it is CFR
+  and `srcD == d` within 1 tick. Every other clip is re-encoded, including a
+  VFR clip whose nominal fps equals the target. The plan row shows the reason
+  ("fps differs" or "not constant frame rate").
+- Each kept segment `[s, e)` of every clip becomes a **grid segment**
+  `(clip, s', N)`:
+  - `s'` = the actual source frame pts nearest to `s`.
+  - Copy clips: `N` = number of source frames with pts in `[s', e)`. Since the
+    clip is CFR with `srcD == d`, the range `[s', s' + N · d)` is exactly N
+    whole frames.
+  - Re-encode clips: `N = round((e − s) / d)`, clamped so `s' + N · d` does
+    not pass the clip end (last pts + last duration).
+  - Segments with `N = 0` are dropped. The plan lists each one as
+    "shorter than one frame, skipped".
 - Output offsets: grid segment k starts at `O_k = Σ_{j<k} N_j · d`. All offsets
   and durations are integer multiples of `d`, so joins cannot break cadence.
-- Mixed mode uses the same builder with each clip's own `srcD` in place of
-  `d`, so Mixed mode also cuts on whole source frames.
+- **Mixed mode** uses the same builder without a global `d`. `s'` and the end
+  are snapped to the nearest actual frame pts, `N` counts actual frames, and
+  offsets add the actual frame durations. VFR sources work unchanged.
 
 #### Copy clips
 
-The composition inserts source range `[s', s' + N · d)` at `O_k`. The clip's
-fps equals the target, so this range is exactly N whole source frames.
+The composition inserts source range `[s', s' + N · d)` at `O_k`.
 
 #### Re-encode clips (`FrameRetimer`, pure)
 
 - For output frame `i` (0 ≤ i < N) of a grid segment, source time is
-  `t_i = s' + i · d`. The retimer picks the source frame with the largest pts
-  `≤ t_i + srcD / 2` (half a source frame of tolerance against rounding).
-  Result: 48 → 24 keeps every second frame; 24 → 48 shows each frame twice.
-  Speed is unchanged.
+  `t_i = s' + i · d`. The retimer picks the source frame with the **largest
+  actual pts `≤ t_i + ε`**. `ε` is 1 tick of the source track timescale. It
+  only absorbs timescale rounding and is far smaller than a frame. Math is
+  exact rational `CMTime` arithmetic.
+- Result on 5 source frames: 24 → 48 picks `0,0,1,1,2,2,3,3,4,4`; 48 → 24
+  picks `0,2,4,…`. Speed is unchanged. Works for VFR sources too, because it
+  reads the pts list.
 - Removed intervals are skipped because each grid segment maps on its own:
   kept ranges `[2, 3)` and `[4, 5)` give output `[0, 1)` from source 2…3 and
   output `[1, 2)` from source 4…5.
@@ -207,8 +236,12 @@ fps equals the target, so this range is exactly N whole source frames.
   differs from the target, then do a passthrough concat.
 - **Re-encode all** (checkbox in the export sheet: "Re-encode everything —
   max compatibility"): every clip goes through the retimer into **one**
-  `AVAssetWriter`. Output has one encoder, one parameter set, and no edit
-  lists. This is the fallback for an NLE that rejects the selective output.
+  `AVAssetWriter`. The video track has one encoder session, one parameter
+  set, and no per-cut edits. The audio track can still carry the AAC
+  encoder-delay (priming) edit that `AVAssetWriter` writes to compensate
+  encoder delay. That edit is expected and correct. Phase 0 tests an
+  audio-bearing Re-encode-all file for sync in the NLE. This is the fallback
+  for an NLE that rejects the selective output.
 - If Phase 0 shows that selective output fails in the user's NLE, Constant
   mode defaults to Re-encode all, and Selective stays available as an option.
 
@@ -219,6 +252,8 @@ frames, which respects edit lists):
 - every frame duration is `d`,
 - frame n has pts `n · d` (tolerance: 1 tick of the track timescale),
 - frame count is `Σ N_k`,
+- the first decoded audio sample is presented at 0 (± one AAC packet), so
+  priming is compensated,
 - audio duration is within one AAC packet of the video duration.
 
 On failure the sheet shows which frames broke cadence. Mixed-mode export
@@ -248,8 +283,9 @@ part of the Phase 0 check.
 The NLE use case is a real requirement, so it is tested first.
 
 1. In `SlateChecks`, build a spike command that takes two real ComfyUI clips
-   (one 24 fps, one 48 fps from RIFE, same codec and size). It cuts both
-   mid-GOP and writes:
+   (one 24 fps, one 48 fps from RIFE, same codec and size). If the real clips
+   have no audio, a generated clip pair with audio is also used, so the AAC
+   priming path is tested. It cuts both mid-GOP and writes:
    - `phase0-mixed.mp4` (Mixed mode),
    - `phase0-selective.mp4` (Constant 24, selective),
    - `phase0-all.mp4` (Constant 24, re-encode all),
@@ -296,10 +332,14 @@ The spike code is throwaway, but `FrameGrid`, `FrameRetimer`, and
   an executable with a tiny assertion harness: `swift run SlateChecks`.
 - Covered by checks: project JSON round-trip and version handling, relink path
   resolution, `ExportPlanner` (copy / reencode / blocked / skipped cases),
-  `FrameGrid` (snapping, `N` rounding, clamping at clip end, offsets are
-  multiples of `d`, 23.976 rational math), `FrameRetimer` (24→48, 48→24,
-  30→30, kept ranges with gaps such as `[2,3)` + `[4,5)`, last-frame
-  duration), `ProjectTimeMap` (both directions, segment edges, zero-length
+  CFR detection (CFR, VFR, and nominal-fps-equal-but-VFR goes to re-encode),
+  `FrameGrid` (snapping to actual pts, `N` rounding, clamping at clip end,
+  offsets are multiples of `d`, 23.976 rational math, `Σ N_k = 0` is
+  blocked), `FrameRetimer` (exact pick sequences: 24→48 gives
+  `0,0,1,1,2,2,3,3,4,4`, 48→24 gives `0,2,4`, 30→30 is identity, VFR input,
+  kept ranges with gaps such as `[2,3)` + `[4,5)`, last-frame duration),
+  preview composition and `ProjectTimeMap` use the same offsets as the
+  export plan, `ProjectTimeMap` (both directions, segment edges, zero-length
   clips), auto-segment rules (first `O` replaces, edge drag converts),
   `SegmentOps` id preservation (regression guard).
 - Integration: `CadenceValidator` runs on every generated export in the
