@@ -34,9 +34,12 @@ public enum CompositionError: Error, LocalizedError {
 public enum CompositionBuilder {
     /// One insert per grid segment, reading from the clip's own file.
     /// Used for Project preview, Mixed export and copied clips.
-    public static func inserts(for grid: [GridSegment], assets: [UUID: AVAsset]) -> [CompositionInsert] {
-        grid.compactMap { g in
-            guard let asset = assets[g.clipID] else { return nil }
+    /// Throws `CompositionError.missingAsset` if a grid segment's clip has no asset —
+    /// silently dropping it would leave a gap at its `outputStart` that later inserts
+    /// would not fill, and the composition's total duration would still match the plan.
+    public static func inserts(for grid: [GridSegment], assets: [UUID: AVAsset]) throws -> [CompositionInsert] {
+        try grid.map { g in
+            guard let asset = assets[g.clipID] else { throw CompositionError.missingAsset(g.clipID) }
             return CompositionInsert(asset: asset, sourceStart: g.sourceStart,
                                      duration: g.outputDuration, outputStart: g.outputStart)
         }
