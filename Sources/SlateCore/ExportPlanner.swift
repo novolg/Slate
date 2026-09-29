@@ -45,7 +45,8 @@ public struct ExportPlan: Equatable {
     public let grid: [GridSegment]
     public let totalDuration: Rational
     public let totalFrames: Int
-    /// T_out: d and every copied clip's timescale divide it.
+    /// T_out: d and every COPIED clip's timescale divide it. Re-encoded and skipped clips
+    /// are optional; if a timescale overflows, it is silently omitted from the fold.
     public let outputTimescale: Int32
     /// The first readable clip. Every other clip must match its size, codec and audio.
     public let reference: ClipMedia?
@@ -113,11 +114,20 @@ public enum ExportPlanner {
         }
         if !project.clips.isEmpty && grid.totalFrames == 0 { blockers.append(.noFrames) }
 
-        let timescales = project.clips.compactMap { clip -> Int32? in
-            guard blocked[clip.id] == nil else { return nil }
-            return clip.media?.frames.timescale
+        // Separate timescales by action: required (copied) vs optional (re-encoded/skipped)
+        var requiredTimescales: [Int32] = []
+        var optionalTimescales: [Int32] = []
+        for plan in clipPlans {
+            if case .copy = plan.action, let ts = project.clips.first(where: { $0.id == plan.clipID })?.media?.frames.timescale {
+                requiredTimescales.append(ts)
+            } else if case .reencode = plan.action, let ts = project.clips.first(where: { $0.id == plan.clipID })?.media?.frames.timescale {
+                optionalTimescales.append(ts)
+            } else if case .skipped = plan.action, let ts = project.clips.first(where: { $0.id == plan.clipID })?.media?.frames.timescale {
+                optionalTimescales.append(ts)
+            }
         }
-        let timescale = outputTimescale(mode: project.fpsMode, clipTimescales: timescales)
+
+        let timescale = outputTimescale(mode: project.fpsMode, required: requiredTimescales, optional: optionalTimescales)
         if timescale == nil { blockers.append(.timescaleOverflow) }
 
         return ExportPlan(mode: project.fpsMode, strategy: project.constantStrategy, clips: clipPlans,
@@ -132,19 +142,37 @@ public enum ExportPlanner {
         return src == d ? .copy : .reencode(.fpsDiffers)
     }
 
-    /// lcm of d's denominator and every usable clip's timescale. In Mixed mode an
-    /// overflow falls back to the largest clip timescale (no cadence promise there).
-    static func outputTimescale(mode: FPSMode, clipTimescales: [Int32]) -> Int32? {
+    /// Compute T_out: the lcm of d (in Constant mode) and every REQUIRED (copied) clip's timescale.
+    /// Then optionally fold in each OPTIONAL timescale (re-encoded/skipped clips) one by one,
+    /// keeping the fold only if the lcm exists and ≤ Int32.max; otherwise skip that timescale.
+    /// In Constant mode: overflow on required → return nil (blocker). In Mixed mode: overflow on
+    /// required → return largest required timescale (or 600 if none). Optional overflows never block.
+    static func outputTimescale(mode: FPSMode, required: [Int32], optional: [Int32]) -> Int32? {
         var t: Int64 = 1
         if case .constant(let d) = mode { t = d.den }
-        var overflow = false
-        for ts in clipTimescales {
-            if let l = Rational.lcm(t, Int64(ts)) { t = l } else { overflow = true; break }
+
+        // Required timescales: any overflow or overflow causes blocker
+        for ts in required {
+            if let l = Rational.lcm(t, Int64(ts)) {
+                if l > Int64(Int32.max) {
+                    if case .mixed = mode { return required.max().map { Int32($0) } ?? 600 }
+                    return nil
+                }
+                t = l
+            } else {
+                if case .mixed = mode { return required.max().map { Int32($0) } ?? 600 }
+                return nil
+            }
         }
-        if overflow || t > Int64(Int32.max) {
-            if case .mixed = mode { return clipTimescales.max() ?? 600 }
-            return nil
+
+        // Optional timescales: silently skip if overflow
+        for ts in optional {
+            if let l = Rational.lcm(t, Int64(ts)), l <= Int64(Int32.max) {
+                t = l
+            }
+            // If lcm fails or exceeds limit, silently skip this optional timescale
         }
+
         return t == 1 ? 600 : Int32(t)
     }
 }

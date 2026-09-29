@@ -85,4 +85,15 @@ func runPlannerChecks() {
         }
         expect(ExportPlanner.plan(Project()).blockers.contains(.noClips))
     }
+
+    check("planner: a re-encoded clip with an odd timescale never blocks export") {
+        let odd = FrameTable.uniform(count: 50, frameDuration: Rational(1, 25), timescale: 2_147_483_629) // large prime
+        let a = TestData.clip(TestData.media(TestData.c24), keep: [(.zero, Rational(1))])
+        let b = TestData.clip(TestData.media(odd), keep: [(.zero, Rational(1))])
+        for strategy in [ConstantStrategy.selective, .reencodeAll] {
+            let plan = ExportPlanner.plan(Project(clips: [a, b], fpsMode: .constant(frameDuration: Rational(1, 24)), constantStrategy: strategy))
+            expect(!plan.blockers.contains(.timescaleOverflow), "\(strategy): \(plan.blockers)")
+            expectEqual(plan.outputTimescale, 12288, "\(strategy)")
+        }
+    }
 }
