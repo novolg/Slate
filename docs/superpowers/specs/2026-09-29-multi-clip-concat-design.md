@@ -1,7 +1,7 @@
 # Multi-clip concat — design
 
 Date: 2026-09-29
-Status: external review passed (no blocking findings); awaiting user approval
+Status: approved by user 2026-09-29. Plan 1 (core + Phase 0) written; Plan 2 (UI) follows Phase 0
 
 ## Goal
 
@@ -319,10 +319,16 @@ part of the Phase 0 check.
 
 The NLE use case is a real requirement, so it is tested first.
 
-1. In `SlateChecks`, build a spike command that takes two real ComfyUI clips
-   (one 24 fps, one 48 fps from RIFE, same codec and size). If the real clips
-   have no audio, a generated clip pair with audio is also used, so the AAC
-   priming path is tested. It cuts both mid-GOP and writes:
+1. The user's clips are private, so Phase 0 uses **generated** clips that
+   match ComfyUI output (Video Helper Suite writes through ffmpeg/libx264):
+   `scripts/make-test-clips.sh` uses the local dev-only ffmpeg to write a
+   24 fps clip and a 48 fps clip interpolated from it (`minterpolate`, a
+   stand-in for RIFE), both 640×360 H.264 yuv420p, default GOP, timescale
+   12288, with and without AAC audio. The script also writes a jittered
+   23.976 clip (timescale 90000) and a clip with a different size. Verified
+   on 2026-09-29: ffmpeg writes 24 fps as 512 ticks and 48 fps as 256 ticks
+   at timescale 12288, exact CFR. The spike command cuts both clips mid-GOP
+   and writes:
    - `phase0-mixed.mp4` (Mixed mode),
    - `phase0-selective.mp4` (Constant 24, selective),
    - `phase0-all.mp4` (Constant 24, re-encode all),
@@ -330,9 +336,11 @@ The NLE use case is a real requirement, so it is tested first.
 2. Automatic checks: `CadenceValidator` plus
    `ffprobe -show_frames` (ffprobe is installed at `/opt/homebrew/bin` for
    development only; it is not bundled).
-3. Manual check by the user in their NLE: import each file and confirm the
-   fps, no extra or missing frames at the joins, no black or frozen frames,
-   and audio in sync.
+3. Optional manual check by the user in DaVinci Resolve (about 2 minutes):
+   import each file and confirm the fps, no extra or missing frames at the
+   joins, no black or frozen frames, and audio in sync. If the user skips it,
+   Selective becomes the default based on the automatic checks alone, and
+   "Re-encode everything" stays available as the fallback.
 4. Decision, recorded in `MASTER_PLAN.md`:
    - Selective passes → Selective is the default.
    - Selective fails, Re-encode all passes → Re-encode all is the default.
@@ -389,14 +397,17 @@ The spike code is throwaway, but `FrameGrid`, `FrameRetimer`, and
     re-encoded in Constant mode.
   - Exact 24 fps at timescale 12288 is copied, and the validator sees exact
     `n · d` pts after concat with a re-encoded 48→24 clip.
-  - The retimer on a jittered 23.976 source with `τ = 1 tick` picks the same
-    frames as on an ideal 23.976 source.
+  - The retimer on a jittered 23.976 source (timescale 90000, `τ = 1 tick`)
+    picks the same frames as **exact** picks (`τ = 0`) on the ideal rational
+    23.976 source, for targets 1/24, 1/30, 1/48 over 2400 frames (verified
+    with exact fractions on 2026-09-29).
   - `[0, 10 ms)` at 24 fps gives `N = 0` under Selective and under Re-encode
     all, and the plan is blocked.
   - For random projects, Selective and Re-encode all give identical `N_k`
     and `O_k`.
 - Integration: `CadenceValidator` runs on every generated export in the
   checks target.
-- Manual: generated test clips (24 fps and 48 fps, with and without audio,
-  made via AVAssetWriter in the checks target) plus the user's real ComfyUI
-  clips. Verify output in QuickTime, and with `ffprobe` if available.
+- Manual: generated test clips from `scripts/make-test-clips.sh` (24 fps and
+  48 fps, with and without audio). Verify output in QuickTime, and with
+  `ffprobe`. The user may also run the app on their own clips locally; those
+  files never enter the repo.
