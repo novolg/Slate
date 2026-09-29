@@ -9,5 +9,6 @@ runFrameTableChecks()
 runFrameGridChecks()
 runPlannerChecks()
 runRetimerChecks()
+runTimeMapChecks()
 
 Harness.finish()
