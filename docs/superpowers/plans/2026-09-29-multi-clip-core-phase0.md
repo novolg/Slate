@@ -2096,6 +2096,18 @@ func runValidatorChecks() async {
         expect(!issues(perfect, zero).isEmpty, "missing duration")
     }
 
+    check("validator: fallback fills only missing durations and keeps a wrong decoded one") {
+        let table = FrameTable.uniform(count: 4, frameDuration: d, timescale: 12288)
+        let decoded: [(pts: Rational, duration: Rational)] = [
+            (d * 0, d), (d * 1, d / Rational(2)), (d * 2, .zero), (d * 3, d),
+        ]
+        let merged = CadenceValidator.mergeDurations(decoded: decoded, table: table)
+        expectEqual(merged, [d, d / Rational(2), d, d])
+        let found = CadenceValidator.cadenceIssues(pts: decoded.map(\.pts), durations: merged,
+                                                   videoEnd: d * 4, frameDuration: d, expectedFrames: 4)
+        expect(!found.isEmpty, "the half-length frame must be reported")
+    }
+
     check("validator: audio start and end within one AAC packet") {
         let ok = CadenceValidator.audioIssues(firstAudioPTS: .zero, audioEnd: Rational(2) + Rational(1, 100),
                                               videoEnd: Rational(2), sampleRate: 44100)
@@ -2142,6 +2154,12 @@ public struct CadenceReport: Equatable {
     public let frameCount: Int
     public let videoDuration: Rational
     public let issues: [String]
+
+    public init(frameCount: Int, videoDuration: Rational, issues: [String]) {
+        self.frameCount = frameCount
+        self.videoDuration = videoDuration
+        self.issues = issues
+    }
 
     public var ok: Bool { issues.isEmpty }
 }
@@ -2244,18 +2262,24 @@ public enum CadenceValidator {
         return CadenceReport(frameCount: pts.count, videoDuration: videoEnd, issues: issues)
     }
 
-    /// Duration of each decoded frame. Uses the decoder's durations when every one is
-    /// reported. Otherwise uses the sample table (an independent source), matched by pts.
-    /// A frame with no duration in either source gets 0, which the check reports.
+    /// Duration of each decoded frame. Every duration the decoder reports is kept as is
+    /// (so a wrong one is still caught). Only missing entries (0) are filled from the
+    /// sample table, matched by pts. A frame missing in both sources stays 0 and fails.
     static func frameDurations(asset: AVAsset, track: AVAssetTrack,
                                decoded: [(pts: Rational, duration: Rational)]) async throws -> [Rational] {
         if decoded.allSatisfy({ $0.duration > .zero }) {
             return decoded.map(\.duration)
         }
         let table = try await ClipProbe.readFrameTable(asset: asset, track: track)
+        return mergeDurations(decoded: decoded, table: table)
+    }
+
+    /// Pure merge used above. Public for checks.
+    public static func mergeDurations(decoded: [(pts: Rational, duration: Rational)],
+                                      table: FrameTable) -> [Rational] {
         var byPTS: [Rational: Rational] = [:]
         for (p, d) in zip(table.pts, table.durations) { byPTS[p] = d }
-        return decoded.map { byPTS[$0.pts] ?? .zero }
+        return decoded.map { $0.duration > .zero ? $0.duration : (byPTS[$0.pts] ?? .zero) }
     }
 
     static func decodedTimes(asset: AVAsset, track: AVAssetTrack,
@@ -2286,7 +2310,7 @@ public enum CadenceValidator {
 - [ ] **Step 4: Run to verify it passes**
 
 Run: `swift run SlateChecks validator`
-Expected: `6 passed, 0 failed, 0 skipped`.
+Expected: `7 passed, 0 failed, 0 skipped`.
 
 If the fixture check fails only on the audio end (ffmpeg `-shortest` can cut audio by more than one packet), print the issue. Then regenerate `c24_a.mp4` without `-shortest` and with `-t 5` on the sine input. Do not loosen the tolerance.
 
@@ -2503,6 +2527,33 @@ private func reencode(_ clip: Clip, to d: Rational, name: String) async throws -
 }
 
 func runReencoderChecks() async {
+    check("reencoder: a missing middle audio buffer is detected") {
+        // 4096 wanted samples; buffers cover [0, 1024) and [3072, 4096) → 2048 missing.
+        var c = AudioCoverage(start: 0, count: 4096)
+        expect(try c.accept(first: 0, count: 1024) != nil)
+        do {
+            _ = try c.accept(first: 3072, count: 1024)
+            expect(false, "a 2048-sample gap must throw")
+        } catch ReencodeError.audioTruncated(let n) {
+            expectEqual(n, 2048)
+        }
+    }
+
+    check("reencoder: a short end within one AAC packet is allowed, more is not") {
+        var ok = AudioCoverage(start: 100, count: 4096)
+        _ = try ok.accept(first: 0, count: 100 + 4096 - 500)
+        try ok.finish()
+        expectEqual(ok.missing, 500)
+        var bad = AudioCoverage(start: 0, count: 4096)
+        _ = try bad.accept(first: 0, count: 2000)
+        do {
+            try bad.finish()
+            expect(false, "2096 missing samples must throw")
+        } catch ReencodeError.audioTruncated {
+            // expected
+        }
+    }
+
     await checkAsync("reencoder: 48→24 output has exact cadence") {
         let clip = try await loadClip("c48.mp4", keep: [(0.3, 2.9)])
         let (url, plan) = try await reencode(clip, to: Rational(1, 24), name: "re-48to24.mp4")
@@ -2851,6 +2902,54 @@ func throwIfReaderFailed(_ reader: AVAssetReader?) throws {
     }
 }
 
+/// Tracks which source samples of one audio piece actually arrived. Pure; public for checks.
+/// Gaps in the middle and a short end both count as missing. More than
+/// `allowedMissing` (one AAC packet) in total is an error.
+public struct AudioCoverage {
+    public let start: Int64
+    public let count: Int64
+    public let allowedMissing: Int64
+    /// Next wanted sample, relative to `start`.
+    public private(set) var cursor: Int64 = 0
+    public private(set) var missing: Int64 = 0
+
+    public init(start: Int64, count: Int64, allowedMissing: Int64 = 1024) {
+        self.start = start
+        self.count = count
+        self.allowedMissing = allowedMissing
+    }
+
+    public var isComplete: Bool { cursor >= count }
+
+    /// A decoded buffer covers source samples [first, first + n). Returns the absolute
+    /// range to keep, or nil when nothing of it is wanted.
+    public mutating func accept(first: Int64, count n: Int64) throws -> (Int64, Int64)? {
+        let wantFrom = start + cursor
+        let lo = max(first, wantFrom)
+        let hi = min(first + n, start + count)
+        guard hi > lo else { return nil }
+        if lo > wantFrom {
+            missing += lo - wantFrom
+            try check()
+        }
+        cursor = hi - start
+        return (lo, hi)
+    }
+
+    /// The source ended. Whatever is still wanted is missing.
+    public mutating func finish() throws {
+        if cursor < count {
+            missing += count - cursor
+            cursor = count
+        }
+        try check()
+    }
+
+    private func check() throws {
+        if missing > allowedMissing { throw ReencodeError.audioTruncated(samples: missing) }
+    }
+}
+
 /// Streams decoded PCM for each grid segment, trimmed to exact sample ranges and
 /// retimed onto the output clock. The AAC encoder in AVAssetWriter adds priming.
 final class AudioSampleSource {
@@ -2868,7 +2967,7 @@ final class AudioSampleSource {
     private var pieceIndex = 0
     private var reader: AVAssetReader?
     private var output: AVAssetReaderTrackOutput?
-    private var emitted: Int64 = 0
+    private var coverage: AudioCoverage?
 
     init(jobs: [ReencodeJob], format: AudioFormat) {
         self.jobs = jobs
@@ -2892,16 +2991,14 @@ final class AudioSampleSource {
         while pieceIndex < pieces.count {
             let piece = pieces[pieceIndex]
             if output == nil { try open(piece) }
-            if emitted >= piece.count {
+            if coverage!.isComplete {
                 closePiece()
                 continue
             }
             guard let buffer = output?.copyNextSampleBuffer() else {
                 try throwIfReaderFailed(reader)
-                // Normal end of the source audio. Allow it to be short by at most one
-                // AAC packet (ffmpeg `-shortest` files); anything more is truncation.
-                let shortfall = piece.count - emitted
-                if shortfall > 1024 { throw ReencodeError.audioTruncated(samples: shortfall) }
+                // Normal end of the source audio: the rest counts as missing.
+                try coverage!.finish()
                 closePiece()
                 continue
             }
@@ -2909,14 +3006,14 @@ final class AudioSampleSource {
             let n = Int64(CMSampleBufferGetNumSamples(buffer))
             guard pts.isNumeric, n > 0 else { continue }
             let first = (Rational(pts) * Rational(rate)).rounded()
-            let wantFrom = piece.sourceStartSample + emitted
-            let wantTo = piece.sourceStartSample + piece.count
-            let lo = max(first, wantFrom)
-            let hi = min(first + n, wantTo)
-            guard hi > lo else {
-                if first >= wantTo { closePiece() }
+            if first >= piece.sourceStartSample + piece.count {
+                try coverage!.finish()
+                closePiece()
                 continue
             }
+            // Counts any gap before this buffer as missing; throws past one AAC packet.
+            guard let kept = try coverage!.accept(first: first, count: n) else { continue }
+            let (lo, hi) = kept
             var sub: CMSampleBuffer?
             let status = CMSampleBufferCopySampleBufferForRange(
                 allocator: nil, sampleBuffer: buffer,
@@ -2934,7 +3031,6 @@ final class AudioSampleSource {
                 sampleTimingArray: &timing, sampleBufferOut: &retimed)
             guard status2 == noErr, let retimed else { throw ReencodeError.audioFailed(status2) }
             guard input.append(retimed) else { throw ReencodeError.writerFailed("audio append failed") }
-            emitted = hi - piece.sourceStartSample
             return true
         }
         return false
@@ -2963,14 +3059,14 @@ final class AudioSampleSource {
         }
         self.reader = reader
         self.output = out
-        emitted = 0
+        coverage = AudioCoverage(start: piece.sourceStartSample, count: piece.count)
     }
 
     private func closePiece() {
         reader?.cancelReading()
         reader = nil
         output = nil
-        emitted = 0
+        coverage = nil
         pieceIndex += 1
     }
 }
@@ -2979,7 +3075,7 @@ final class AudioSampleSource {
 - [ ] **Step 4: Run to verify it passes**
 
 Run: `swift run SlateChecks reencoder`
-Expected: `4 passed, 0 failed, 0 skipped`.
+Expected: `6 passed, 0 failed, 0 skipped`.
 
 If a cadence check fails with frames off the grid, print the first 5 decoded pts and the output track's `timeRange`. Check that `writer.movieTimeScale` and `videoInput.mediaTimeScale` equal the plan's timescale. Do not add a tolerance to the validator.
 
@@ -3056,6 +3152,24 @@ func runExporterChecks() async {
         let (report, plan) = try await exportProject(Project(clips: [a, b], fpsMode: d24), name: "ex-dup.mp4")
         expect(report.ok, "\(report.issues)")
         expectEqual(plan.totalFrames, 48)
+    }
+
+    await checkAsync("exporter: a failed validation never replaces an existing export") {
+        let a = try await loadClip("c24.mp4", keep: [(0.5, 1.5)])
+        let out = try checksOutputDirectory().appendingPathComponent("ex-invalid.mp4")
+        try Data("previous export".utf8).write(to: out)
+        let exporter = ProjectExporter()
+        exporter.validator = { _, _ in
+            CadenceReport(frameCount: 0, videoDuration: .zero, issues: ["simulated failure"])
+        }
+        do {
+            _ = try await exporter.export(project: Project(clips: [a], fpsMode: d24), outputURL: out,
+                                          tempDirectory: try checksOutputDirectory(), progress: { _ in })
+            expect(false, "expected validationFailed")
+        } catch ProjectExportError.validationFailed(let report) {
+            expectEqual(report.issues, ["simulated failure"])
+        }
+        expectEqual(try String(contentsOf: out, encoding: .utf8), "previous export")
     }
 
     await checkAsync("exporter: blocked project throws and writes nothing") {
@@ -3180,6 +3294,7 @@ public enum ExportStage: Equatable {
 public enum ProjectExportError: Error, LocalizedError {
     case blocked([PlanBlocker])
     case outputIsSource
+    case validationFailed(CadenceReport)
     case cannotCreateSession
     case exportFailed(String)
     case cancelled
@@ -3188,6 +3303,7 @@ public enum ProjectExportError: Error, LocalizedError {
         switch self {
         case .blocked: return "The project cannot be exported. See the plan for details."
         case .outputIsSource: return "The output file is one of the source clips. Choose another name."
+        case .validationFailed(let r): return "The exported file failed validation: \(r.issues.joined(separator: "; "))"
         case .cannotCreateSession: return "Could not create the export session."
         case .exportFailed(let m): return "Export failed: \(m)"
         case .cancelled: return "Cancelled."
@@ -3200,6 +3316,18 @@ public final class ProjectExporter: @unchecked Sendable {
     private var cancelled = false
     private var session: AVAssetExportSession?
     private var reencoder: ClipReencoder?
+
+    /// Checks the staged file. Replaceable in checks to simulate a failed validation.
+    public var validator: (URL, ExportPlan) async throws -> CadenceReport = { url, plan in
+        try await CadenceValidator.validate(url: url, frameDuration: plan.frameDuration,
+                                            expectedFrames: plan.totalFrames,
+                                            expectedDuration: plan.totalDuration,
+                                            audioSampleRate: plan.audio?.sampleRate)
+    }
+
+    /// If set, a file that fails validation is saved here for inspection (Phase 0).
+    /// The real destination is never touched in that case.
+    public var keepInvalidAt: URL?
 
     public init() {}
 
@@ -3232,11 +3360,13 @@ public final class ProjectExporter: @unchecked Sendable {
             try await render(plan: plan, project: project, output: staged, work: work, progress: progress)
             if isCancelled { throw ProjectExportError.cancelled }
             progress(.validating)
-            let report = try await CadenceValidator.validate(url: staged, frameDuration: plan.frameDuration,
-                                                             expectedFrames: plan.totalFrames,
-                                                             expectedDuration: plan.totalDuration,
-                                                             audioSampleRate: plan.audio?.sampleRate)
+            let report = try await validator(staged, plan)
             if isCancelled { throw ProjectExportError.cancelled }
+            guard report.ok else {
+                // Never replace the destination with a file that failed validation.
+                if let keepInvalidAt { try Self.install(staged, at: keepInvalidAt) }
+                throw ProjectExportError.validationFailed(report)
+            }
             try Self.install(staged, at: outputURL)
             return report
         } catch {
@@ -3384,7 +3514,7 @@ public final class ProjectExporter: @unchecked Sendable {
 - [ ] **Step 4: Run to verify it passes**
 
 Run: `swift run SlateChecks exporter`
-Expected: `8 passed, 0 failed, 0 skipped`.
+Expected: `9 passed, 0 failed, 0 skipped`.
 
 A failure in "constant 24 selective" while "re-encode all" passes is a real Phase 0 finding. It is NOT a bug to hide. Record the issues text and continue to Task 13. The spec's decision rule decides what happens next.
 
@@ -3486,13 +3616,18 @@ enum Phase0 {
                 let project = Project(clips: [a, b], fpsMode: c.mode, constantStrategy: c.strategy)
                 let plan = ExportPlanner.plan(project)
                 let actions = plan.clips.map { "\($0.action)" }.joined(separator: ", ")
+                // A file that fails validation is kept as *-INVALID.mp4 for ffprobe/Resolve.
+                let exporter = ProjectExporter()
+                exporter.keepInvalidAt = outDir.appendingPathComponent(
+                    c.file.replacingOccurrences(of: ".mp4", with: "-INVALID.mp4"))
                 do {
-                    let report = try await ProjectExporter().export(
+                    let report = try await exporter.export(
                         project: project, outputURL: outDir.appendingPathComponent(c.file),
                         tempDirectory: tmpDir, progress: { _ in })
-                    let status = report.ok ? "PASS" : "FAIL"
-                    if !report.ok { failures += 1 }
-                    print("\(status)  \(c.file)  frames=\(report.frameCount)  duration=\(report.videoDuration.seconds)s  [\(actions)]")
+                    print("PASS  \(c.file)  frames=\(report.frameCount)  duration=\(report.videoDuration.seconds)s  [\(actions)]")
+                } catch ProjectExportError.validationFailed(let report) {
+                    failures += 1
+                    print("FAIL  \(c.file)  frames=\(report.frameCount)  [\(actions)]  (kept as -INVALID.mp4)")
                     for issue in report.issues { print("      - \(issue)") }
                 } catch {
                     failures += 1

@@ -315,7 +315,8 @@ Delete temp files on success, failure, and cancel.
   after resolving symlinks, and existing files by file identity, so symlinked
   folders, case aliases, and hard links are caught.
 - The export renders and validates a staged file in the temp folder. Only after
-  success does it replace the destination. A failed or cancelled export leaves
+  success, including a passing validation, does it replace the destination. A
+  failed, invalid or cancelled export leaves
   an existing file at the destination unchanged.
 - Decoder failures are errors. A frame is repeated only when the retimer picks
   the same source frame again, never because the reader stopped early. Source
