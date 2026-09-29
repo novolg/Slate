@@ -13,5 +13,6 @@ runTimeMapChecks()
 await runProbeChecks()
 await runValidatorChecks()
 await runCompositionChecks()
+await runReencoderChecks()
 
 Harness.finish()
