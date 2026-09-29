@@ -46,6 +46,6 @@ func runRationalChecks() {
         expectEqual(Rational.gcd(12288, 24), 24)
         expectEqual(Rational.lcm(12288, 24), 12288)
         expectEqual(Rational.lcm(24000, 90000), 360000)
-        expect(Rational.lcm(Int64.max / 2, Int64.max / 3) == nil)
+        expect(Rational.lcm(Int64.max, Int64.max - 1) == nil, "consecutive numbers are coprime; the product overflows")
     }
 }
