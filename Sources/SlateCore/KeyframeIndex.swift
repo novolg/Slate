@@ -1,17 +1,21 @@
 import Foundation
 import CoreMedia
 
-struct KeyframeIndex: Equatable {
+public struct KeyframeIndex: Equatable {
     /// Sorted ascending presentation timestamps of sync samples in the video track.
-    let times: [CMTime]
+    public let times: [CMTime]
 
-    var isEmpty: Bool { times.isEmpty }
-    var count: Int { times.count }
-    var first: CMTime? { times.first }
-    var last: CMTime? { times.last }
+    public init(times: [CMTime]) {
+        self.times = times
+    }
+
+    public var isEmpty: Bool { times.isEmpty }
+    public var count: Int { times.count }
+    public var first: CMTime? { times.first }
+    public var last: CMTime? { times.last }
 
     /// Nearest keyframe time to `t`. Returns nil iff `times` is empty.
-    func nearest(to t: CMTime) -> CMTime? {
+    public func nearest(to t: CMTime) -> CMTime? {
         guard !times.isEmpty else { return nil }
         let i = lowerBound(t)
         if i == 0 { return times[0] }
@@ -24,14 +28,14 @@ struct KeyframeIndex: Equatable {
     }
 
     /// Largest keyframe time ≤ `t`. Returns nil if no such keyframe exists.
-    func floor(_ t: CMTime) -> CMTime? {
+    public func floor(_ t: CMTime) -> CMTime? {
         guard !times.isEmpty else { return nil }
         let i = upperBound(t)
         return i == 0 ? nil : times[i - 1]
     }
 
     /// Smallest keyframe time ≥ `t`. Returns nil if no such keyframe exists.
-    func ceil(_ t: CMTime) -> CMTime? {
+    public func ceil(_ t: CMTime) -> CMTime? {
         guard !times.isEmpty else { return nil }
         let i = lowerBound(t)
         return i == times.count ? nil : times[i]

@@ -3,6 +3,7 @@ import AVFoundation
 import Observation
 import AppKit
 import UniformTypeIdentifiers
+import SlateCore
 
 @Observable
 final class EditorViewModel {

@@ -2,6 +2,7 @@ import SwiftUI
 import AVFoundation
 import AppKit
 import CoreMedia
+import SlateCore
 
 @MainActor
 struct EditorView: View {
