@@ -174,21 +174,31 @@ All timing math uses **actual sample timestamps**, never nominal fps or
   `B = {pts_0, …, pts_{n−1}, clipEnd}` with `clipEnd = pts_{n−1} +
   duration_{n−1}`. Every snap goes to the nearest element of `B`. So a
   full-clip selection `[0, clipEnd)` keeps all n frames.
-- **Jitter tolerance `τ`.** Some files store an exact rate with rounded
-  ticks, for example 23.976 at timescale 90000 gives durations 3753 and 3754.
-  So `τ = 1 tick` only when `1 tick ≤ srcD / 100`. Otherwise `τ = 0`. At
-  timescale 24, one tick is a whole frame, so `τ = 0` and all comparisons are
-  exact. `τ` is the only tolerance anywhere in the spec.
-- **CFR check.** A clip is CFR when every frame duration and every gap between
-  consecutive pts equal the mean `srcD = (clipEnd − pts_0) / n` within `τ`.
-  Otherwise the clip is VFR.
-- `d` is exact. If a CFR clip's `srcD` equals the target rate within `τ`, `d`
-  is that clip's `srcD` (this gives `1001/24000` for 23.976). Otherwise `d`
-  is built from the target value.
-- **Copy eligibility (Constant mode).** A clip is copied only if it is CFR
-  and `|srcD − d| · n ≤ τ` (no drift across the clip). Every other clip is
-  re-encoded, including a VFR clip whose nominal fps equals the target. The
-  plan row shows the reason ("fps differs" or "not constant frame rate").
+- **Exact CFR.** A clip is *exact CFR* when every frame duration and every gap
+  between consecutive pts are **exactly equal** (no tolerance). Then `srcD`
+  is that duration. Any other clip is treated as VFR, including jittered
+  files such as 23.976 at timescale 90000 (durations 3753/3754). Jitter can
+  add up across a clip (100 × 3754 then 100 × 3753 is 50 ticks off-grid in
+  the middle), so no per-frame tolerance is safe for copying.
+- `d` is exact, built from the target rate (`1/24`, `1/48`,
+  `1001/24000`, …).
+- **Copy eligibility (Constant mode).** A clip is copied only if it is exact
+  CFR and `srcD == d` exactly. Then every copied frame sits exactly on the
+  output grid, and every copied range is exactly `N · d` long. Every other
+  clip is re-encoded, including a jittered or VFR clip whose nominal fps
+  equals the target. The plan row shows the reason ("fps differs" or "frame
+  timing not exact").
+- **Output timescale.** The composition tracks and the re-encode writer use
+  one timescale `T_out` in which `d` is a whole number of ticks and every
+  copied clip's timescale divides `T_out` (lcm of those values). So all
+  offsets are exact integers. Typical ComfyUI files (ffmpeg, 24 fps at 12288
+  and 48 fps at 12288) give `T_out = 12288`. Phase 0 confirms this on the
+  user's real clips with `ffprobe`.
+- **Retimer tolerance `τ`.** This is the only tolerance in the spec, and it
+  is used only when the retimer picks a source frame (see below). It is never
+  used for copy eligibility or validation. `τ = 1 source tick` when
+  `1 tick ≤ srcD / 100` (or ≤ 1% of the shortest frame for VFR), else
+  `τ = 0`.
 
 #### One quantization policy (`FrameGrid`, pure)
 
@@ -210,15 +220,18 @@ For each kept segment `[s, e)`:
 In Constant mode every offset and duration is a multiple of `d`, so joins
 cannot break cadence.
 
-**Mixed mode with a VFR clip** (no single `srcD`): `s'` and `e'` are both
-snapped to the nearest element of `B`, `N` = number of source frames in
-`[s', e')`, and the segment duration is `e' − s'`.
+**Mixed mode with a non-exact-CFR clip** (no single `srcD`): `s'` and `e'`
+are both snapped to the nearest element of `B`, `N` = number of source frames
+in `[s', e')`, and the segment duration is `e' − s'`. Mixed mode copies
+everything and makes no cadence promise, so jitter is fine there.
 
 #### Copy clips
 
 The composition inserts the source range `[pts_a, pts_{a+N})` at `O_k`, where
 `pts_a = s'` (use `clipEnd` when `a + N = n`). These are exactly the N source
-frames. With `τ > 0` the range can differ from `N · d` by at most `τ`.
+frames. In Constant mode copy clips are exact CFR with `srcD == d`, so the
+range is exactly `N · d`, and segment k+1 starts exactly where segment k
+ends. No gaps and no overlaps.
 
 #### Re-encode clips (`FrameRetimer`, pure)
 
@@ -271,8 +284,9 @@ frames. With `τ > 0` the range can differ from `N · d` by at most `τ`.
 
 After a Constant-mode export, read the output with `AVAssetReader` (decoded
 frames, which respects edit lists):
-- every frame duration is `d`,
-- frame n has pts `n · d` (tolerance: output `τ`, the same rule as above),
+- every frame duration is exactly `d` (in `T_out` ticks),
+- frame n has pts exactly `n · d` (no tolerance; the planner only allows
+  exact inputs, so any mismatch is a real bug),
 - frame count is `Σ N_k`,
 - the first decoded audio sample is presented at 0 (± one AAC packet), so
   priming is compensated,
@@ -368,7 +382,14 @@ The spike code is throwaway, but `FrameGrid`, `FrameRetimer`, and
   - Mixed mode, full 5-frame clip `[0, clipEnd)` keeps all 5 frames.
   - Timescale 24 source: `τ = 0`, and 24→48 still picks
     `0,0,1,1,2,2,3,3,4,4`.
-  - 23.976 at timescale 90000 (3753/3754 durations) is CFR with `τ = 1 tick`.
+  - 23.976 at timescale 90000 (3753/3754 durations) is not exact CFR. It is
+    re-encoded in Constant mode and copied in Mixed mode.
+  - 100 frames × 3754 ticks then 100 × 3753 is not exact CFR and is
+    re-encoded in Constant mode.
+  - Exact 24 fps at timescale 12288 is copied, and the validator sees exact
+    `n · d` pts after concat with a re-encoded 48→24 clip.
+  - The retimer on a jittered 23.976 source with `τ = 1 tick` picks the same
+    frames as on an ideal 23.976 source.
   - `[0, 10 ms)` at 24 fps gives `N = 0` under Selective and under Re-encode
     all, and the plan is blocked.
   - For random projects, Selective and Re-encode all give identical `N_k`
