@@ -46,15 +46,21 @@ public struct FrameTable: Equatable {
         return tick * 100 <= shortest ? tick : .zero
     }
 
+    /// First index i in `xs` with xs[i] >= t (xs.count if none).
+    private func lowerBound(in xs: [Rational], _ t: Rational) -> Int {
+        var lo = 0
+        var hi = xs.count
+        while lo < hi {
+            let mid = (lo + hi) / 2
+            if xs[mid] < t { lo = mid + 1 } else { hi = mid }
+        }
+        return lo
+    }
+
     /// Index into `boundaries` (0...count) nearest to `t`. Ties go to the earlier boundary.
     public func nearestBoundaryIndex(to t: Rational) -> Int {
         let b = boundaries
-        var lo = 0
-        var hi = b.count
-        while lo < hi {
-            let mid = (lo + hi) / 2
-            if b[mid] < t { lo = mid + 1 } else { hi = mid }
-        }
+        let lo = lowerBound(in: b, t)
         if lo == 0 { return 0 }
         if lo == b.count { return b.count - 1 }
         return (t - b[lo - 1]) <= (b[lo] - t) ? lo - 1 : lo
@@ -74,12 +80,7 @@ public struct FrameTable: Equatable {
     /// Smallest index into `boundaries` whose value is ≥ `t` (count when `t` > clipEnd is clamped to count).
     public func firstBoundaryIndex(atOrAfter t: Rational) -> Int {
         let b = boundaries
-        var lo = 0
-        var hi = b.count
-        while lo < hi {
-            let mid = (lo + hi) / 2
-            if b[mid] < t { lo = mid + 1 } else { hi = mid }
-        }
+        let lo = lowerBound(in: b, t)
         return min(lo, b.count - 1)
     }
 }
