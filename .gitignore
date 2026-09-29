@@ -14,3 +14,6 @@ MASTER_PLAN.md
 
 # Antigravity CLI
 .antigravitycli/
+
+# Claude Code worktrees
+.claude/worktrees/
