@@ -24,6 +24,9 @@ struct TimelineView: View {
     @State private var dragKind: DragKind = .none
     @State private var lastMagnification: Double = 1.0
     @State private var hoverNearEdge: Bool = false
+    @State private var didBeginDrag = false
+    @State private var dragStartX: CGFloat = 0
+    @State private var edgeOffset: CGFloat = 0
 
     /// Ticks per second used for times created from mouse positions (the clip's own track timescale).
     private var sourceTimescale: Int32 { vm.selectedClip?.media?.frames.timescale ?? 600 }
@@ -91,42 +94,51 @@ struct TimelineView: View {
     private func handleMouseDown(_ p: CGPoint, contentWidth: CGFloat, total: Double) {
         let kind = classify(at: p, contentWidth: contentWidth, total: total)
         dragKind = kind
+        didBeginDrag = false
+        dragStartX = p.x
+        edgeOffset = 0
         switch kind {
         case .none:
             break
         case .seek:
-            // Click on a segment body selects it; a click in an empty area seeks.
-            if let s = hitSegment(atX: p.x, contentWidth: contentWidth, total: total) {
-                vm.selectedSegmentID = s.id
-            } else {
-                vm.selectedSegmentID = nil
-                vm.timelineSeek(to: time(forX: p.x, contentWidth: contentWidth, total: total))
+            // A click on a segment body selects it and seeks; empty space clears the selection and seeks.
+            let hit = hitSegment(atX: p.x, contentWidth: contentWidth, total: total)
+            vm.selectSegment(hit?.id)
+            vm.timelineSeek(to: time(forX: p.x, contentWidth: contentWidth, total: total))
+        case .edge(let id, let edge):
+            // Only select; the model is not touched until the pointer really moves.
+            vm.selectSegment(id)
+            if let seg = vm.segments.first(where: { $0.id == id }) {
+                let edgeSeconds = (edge == .start ? seg.start : seg.end).seconds
+                edgeOffset = CGFloat(edgeSeconds / total) * contentWidth - p.x
             }
-        case .edge(let id, _):
-            vm.selectedSegmentID = id
-            vm.beginSegmentDrag()
         }
     }
 
     private func handleMouseDragged(_ p: CGPoint, contentWidth: CGFloat, total: Double) {
-        let t = time(forX: p.x, contentWidth: contentWidth, total: total)
         switch dragKind {
         case .none:
             break
         case .seek:
-            // Keep seeking only if the press started in an empty area (no segment selected then).
-            if vm.selectedSegmentID == nil { vm.timelineSeek(to: t) }
+            vm.timelineSeek(to: time(forX: p.x, contentWidth: contentWidth, total: total))
         case .edge(let id, let edge):
-            vm.dragEdge(id: id, edge: edge, to: t)
+            if !didBeginDrag {
+                guard abs(p.x - dragStartX) >= 3 else { return }
+                didBeginDrag = true
+                vm.beginSegmentDrag()
+            }
+            vm.dragEdge(id: id, edge: edge, to: time(forX: p.x + edgeOffset, contentWidth: contentWidth, total: total))
         }
     }
 
     private func handleMouseUp(_ p: CGPoint, contentWidth: CGFloat, total: Double) {
-        if case .edge(let id, let edge) = dragKind {
-            vm.dragEdge(id: id, edge: edge, to: time(forX: p.x, contentWidth: contentWidth, total: total))
+        if case .edge(let id, let edge) = dragKind, didBeginDrag {
+            vm.dragEdge(id: id, edge: edge, to: time(forX: p.x + edgeOffset, contentWidth: contentWidth, total: total))
             vm.endSegmentDrag()
         }
         dragKind = .none
+        didBeginDrag = false
+        edgeOffset = 0
     }
 
     private func handleMouseMoved(_ p: CGPoint, contentWidth: CGFloat, total: Double) {

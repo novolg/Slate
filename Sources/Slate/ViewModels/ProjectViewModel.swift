@@ -97,6 +97,12 @@ final class ProjectViewModel {
         set { editor.selectedSegmentID = newValue }
     }
 
+    /// Timeline selection writes go through here: leave Project mode first, then select.
+    func selectSegment(_ id: UUID?) {
+        ensureClipMode()
+        editor.selectedSegmentID = id
+    }
+
     /// Source time of the playhead as the timeline shows it. In Project mode this is the mapped
     /// position inside the clip under the project playhead.
     var timelinePlayhead: CMTime {
