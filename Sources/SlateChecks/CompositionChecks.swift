@@ -58,4 +58,18 @@ func runCompositionChecks() async {
             expectEqual(at, Rational(1, 7))
         }
     }
+
+    await checkAsync("composition: audio more than one AAC packet short throws and names the clip") {
+        let a = try await loadClip("c24_trunc_a.mp4", keep: [(0, 5)])
+        let plan = ExportPlanner.plan(Project(clips: [a], fpsMode: .mixed))
+        do {
+            _ = try await CompositionBuilder.build(
+                inserts: CompositionBuilder.inserts(for: plan.grid, assets: [a.id: AVURLAsset(url: a.url)]),
+                includeAudio: true, timescale: plan.outputTimescale)
+            expect(false, "expected audioTruncated")
+        } catch CompositionError.audioTruncated(let clip, let seconds) {
+            expectEqual(clip, a.id)
+            expect(seconds > 0.4 && seconds < 0.6, "seconds \(seconds)")
+        }
+    }
 }

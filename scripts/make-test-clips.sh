@@ -27,6 +27,11 @@ X264=(-c:v libx264 -pix_fmt yuv420p -crf 19)
     -f lavfi -i sine=frequency=440:sample_rate=44100:duration=4.99 \
     "${X264[@]}" -c:a aac -b:a 128k "$OUT/c24_short_a.mp4"
 
+# Audio 0.5 s shorter than the video: far beyond one AAC packet, must be refused.
+"${FF[@]}" -f lavfi -i testsrc2=size=640x360:rate=24:duration=5 \
+    -f lavfi -i sine=frequency=440:sample_rate=44100:duration=4.5 \
+    "${X264[@]}" -c:a aac -b:a 128k "$OUT/c24_trunc_a.mp4"
+
 # Video-only versions.
 "${FF[@]}" -i "$OUT/c24_a.mp4" -an -c:v copy "$OUT/c24.mp4"
 "${FF[@]}" -i "$OUT/c48_a.mp4" -an -c:v copy "$OUT/c48.mp4"

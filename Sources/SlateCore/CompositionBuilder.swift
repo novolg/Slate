@@ -8,12 +8,15 @@ public struct CompositionInsert {
     public let sourceStart: Rational
     public let duration: Rational
     public let outputStart: Rational
+    public let clipID: UUID?
 
-    public init(asset: AVAsset, sourceStart: Rational, duration: Rational, outputStart: Rational) {
+    public init(asset: AVAsset, sourceStart: Rational, duration: Rational, outputStart: Rational,
+                clipID: UUID? = nil) {
         self.asset = asset
         self.sourceStart = sourceStart
         self.duration = duration
         self.outputStart = outputStart
+        self.clipID = clipID
     }
 }
 
@@ -22,6 +25,7 @@ public enum CompositionError: Error, LocalizedError {
     case noVideoTrack
     case missingAsset(UUID)
     case offGrid(Rational)
+    case audioTruncated(clip: UUID?, seconds: Double)
 
     public var errorDescription: String? {
         switch self {
@@ -29,6 +33,8 @@ public enum CompositionError: Error, LocalizedError {
         case .noVideoTrack: return "A clip has no video track."
         case .missingAsset(let id): return "No asset for clip \(id)."
         case .offGrid(let t): return "A clip cannot be placed exactly at \(t) s on the output timeline."
+        case .audioTruncated(let clip, let s):
+            return "The audio of clip \(clip.map { $0.uuidString } ?? "?") ends \(String(format: "%.2f", s)) s before its video."
         }
     }
 }
@@ -43,7 +49,8 @@ public enum CompositionBuilder {
         try grid.map { g in
             guard let asset = assets[g.clipID] else { throw CompositionError.missingAsset(g.clipID) }
             return CompositionInsert(asset: asset, sourceStart: g.sourceStart,
-                                     duration: g.outputDuration, outputStart: g.outputStart)
+                                     duration: g.outputDuration, outputStart: g.outputStart,
+                                     clipID: g.clipID)
         }
     }
 
@@ -72,9 +79,16 @@ public enum CompositionBuilder {
             try video.insertTimeRange(range, of: srcVideo, at: at)
 
             if let audio, let srcAudio = try await ins.asset.loadTracks(withMediaType: .audio).first {
-                // Audio may end a few ms before video. Insert only the overlapping part.
+                // Audio may end a few ms before video. Insert only the overlapping part,
+                // but never more than one AAC packet (1024 samples) short.
                 let audioRange = try await srcAudio.load(.timeRange)
                 let clipped = range.intersection(audioRange)
+                let covered = clipped.duration > .zero ? Rational(clipped.duration) : Rational.zero
+                let missing = Rational(range.duration) - covered
+                let rate = try await Self.sampleRate(of: srcAudio)
+                if missing > Rational(1024, Int64(rate.rounded())) {
+                    throw CompositionError.audioTruncated(clip: ins.clipID, seconds: missing.seconds)
+                }
                 if clipped.duration > .zero {
                     let offset = CMTimeSubtract(clipped.start, range.start)
                     try audio.insertTimeRange(clipped, of: srcAudio, at: CMTimeAdd(at, offset))
@@ -82,5 +96,14 @@ public enum CompositionBuilder {
             }
         }
         return comp
+    }
+
+    private static func sampleRate(of track: AVAssetTrack) async throws -> Double {
+        let formats = try await track.load(.formatDescriptions)
+        if let f = formats.first, let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(f)?.pointee,
+           asbd.mSampleRate > 0 {
+            return asbd.mSampleRate
+        }
+        return 44100
     }
 }

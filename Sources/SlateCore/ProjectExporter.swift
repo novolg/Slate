@@ -208,7 +208,8 @@ public final class ProjectExporter: @unchecked Sendable {
                 }
                 let total = cp.segments.reduce(Rational.zero) { $0 + $1.outputDuration }
                 inserts.append(CompositionInsert(asset: AVURLAsset(url: tmp), sourceStart: .zero,
-                                                 duration: total, outputStart: cp.segments[0].outputStart))
+                                                 duration: total, outputStart: cp.segments[0].outputStart,
+                                                 clipID: cp.clipID))
             case .skipped, .blocked:
                 continue
             }

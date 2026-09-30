@@ -10,6 +10,7 @@ public enum ReencodeError: Error, LocalizedError {
     case readerFailed(String)
     case audioFailed(OSStatus)
     case audioTruncated(samples: Int64)
+    case clipAudioTruncated(clip: UUID?, samples: Int64)
     case missingFrame
     case cancelled
 
@@ -19,6 +20,8 @@ public enum ReencodeError: Error, LocalizedError {
         case .cannotStartReader(let m): return "Could not read a clip: \(m)"
         case .readerFailed(let m): return "Reading a clip failed: \(m)"
         case .audioTruncated(let n): return "A clip's audio ends \(n) samples early."
+        case .clipAudioTruncated(let clip, let n):
+            return "The audio of clip \(clip.map { $0.uuidString } ?? "?") ends \(n) samples early."
         case .writerFailed(let m): return "Encoding failed: \(m)"
         case .audioFailed(let s): return "Audio processing failed (\(s))."
         case .missingFrame: return "A source frame could not be decoded."
@@ -379,6 +382,12 @@ final class AudioSampleSource {
     /// (if any) must be appended first; delivered on the following call.
     private var pendingKept: (buffer: CMSampleBuffer, first: Int64, lo: Int64, hi: Int64)?
 
+    private func naming<T>(_ piece: Piece, _ body: () throws -> T) throws -> T {
+        do { return try body() } catch ReencodeError.audioTruncated(let samples) {
+            throw ReencodeError.clipAudioTruncated(clip: jobs[piece.job].segments.first?.clipID, samples: samples)
+        }
+    }
+
     init(jobs: [ReencodeJob], format: AudioFormat) {
         self.jobs = jobs
         self.format = format
@@ -419,7 +428,7 @@ final class AudioSampleSource {
             guard let buffer = output?.copyNextSampleBuffer() else {
                 try throwIfReaderFailed(reader)
                 // Normal end of the source audio: pad the remainder with silence.
-                let gapCount = try coverage!.finish()
+                let gapCount = try naming(piece) { try coverage!.finish() }
                 let gapStart = piece.outStartSample + piece.count - gapCount
                 closePiece()
                 if gapCount > 0 {
@@ -433,7 +442,7 @@ final class AudioSampleSource {
             guard pts.isNumeric, n > 0 else { continue }
             let first = (Rational(pts) * Rational(rate)).rounded()
             if first >= piece.sourceStartSample + piece.count {
-                let gapCount = try coverage!.finish()
+                let gapCount = try naming(piece) { try coverage!.finish() }
                 let gapStart = piece.outStartSample + piece.count - gapCount
                 closePiece()
                 if gapCount > 0 {
@@ -443,7 +452,7 @@ final class AudioSampleSource {
                 continue
             }
             // Counts any gap before this buffer as missing; throws past one AAC packet.
-            let accepted = try coverage!.accept(first: first, count: n)
+            let accepted = try naming(piece) { try coverage!.accept(first: first, count: n) }
             guard let (lo, hi) = accepted.range else { continue }
             if accepted.gapBefore > 0 {
                 // Emit the gap as silence now; deliver this same buffer's kept range
