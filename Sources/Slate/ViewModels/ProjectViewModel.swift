@@ -61,6 +61,10 @@ final class ProjectViewModel {
     @ObservationIgnored private var exporter: ProjectExporter?
     @ObservationIgnored private var exportTask: Task<Void, Never>?
     @ObservationIgnored private var didOfferRestore = false
+    @ObservationIgnored private var restoreSettled = false
+    @ObservationIgnored private var pendingProjectMode = false
+    @ObservationIgnored private var projectGeneration = 0
+    @ObservationIgnored private var exportToken: UUID?
 
     private let zoomMin = 1.0
     private let zoomMax = 64.0
@@ -100,10 +104,27 @@ final class ProjectViewModel {
         case .clip:
             return clipTime
         case .project:
-            guard projectTime.isNumeric, let loc = timeMap.locate(Rational(projectTime)),
+            guard projectTime.isNumeric, let loc = timeMap.locate(quantized(projectTime, timescale: plan.outputTimescale)),
                   loc.clipID == editor.selectedClipID else { return .zero }
-            return loc.sourceTime.cmTime
+            return cmTime(loc.sourceTime, timescale: sourceTimescale(of: loc.clipID))
         }
+    }
+
+    // MARK: Bounded time conversions
+
+    /// Player times can carry any timescale; snap them to a fixed one before they meet grid rationals,
+    /// so denominators stay bounded.
+    private func quantized(_ t: CMTime, timescale: Int32) -> Rational {
+        Rational(CMTimeConvertScale(t, timescale: timescale, method: .roundHalfAwayFromZero))
+    }
+
+    /// Never use `Rational.cmTime` on a derived value: its denominator can exceed Int32.
+    private func cmTime(_ r: Rational, timescale: Int32) -> CMTime {
+        CMTime(value: (r * Rational(Int64(timescale))).rounded(), timescale: timescale)
+    }
+
+    private func sourceTimescale(of clipID: UUID?) -> Int32 {
+        project.clips.first { $0.id == clipID }?.media?.frames.timescale ?? 600
     }
 
     var isPlaying: Bool {
@@ -157,6 +178,11 @@ final class ProjectViewModel {
             projectStale = true
             documentVersion += 1
             autosaver?.noteChange()
+            if mode == .project {
+                // Safety net: the plan changed under the Project player; go back to Clip mode unmapped.
+                mode = .clip
+                projectPlayer?.pause()
+            }
         }
         if mode == .clip { syncClipPlayer() }
     }
@@ -214,7 +240,9 @@ final class ProjectViewModel {
         isLoadingFiles = true
         defer { isLoadingFiles = false }
         var clips: [Clip] = []
-        var failures: [String] = []
+        var failures: [String] = urls
+            .filter { !Self.videoExtensions.contains($0.pathExtension.lowercased()) }
+            .map { "\($0.lastPathComponent): not a video file Slate can open (mp4, m4v, mov)" }
         for url in videos {
             do {
                 let media = try await ClipProbe.probe(url: url)
@@ -233,9 +261,11 @@ final class ProjectViewModel {
 
     func openProject(at url: URL) async {
         guard confirmDiscardChanges() else { return }
+        autosaver?.cancel()
+        let wasUntitled = document.isUntitled
         do {
             let loaded = try await ProjectFile.load(from: url)
-            replaceProject(loaded, url: url, followsHighest: false)
+            replaceProject(loaded, url: url, followsHighest: false, discardUntitledAutosave: wasUntitled)
         } catch {
             errorMessage = "Could not open \(url.lastPathComponent): \(error.localizedDescription)"
         }
@@ -243,11 +273,15 @@ final class ProjectViewModel {
 
     func newProject() {
         guard confirmDiscardChanges() else { return }
+        autosaver?.cancel()
         document.discardUntitledAutosave()
-        replaceProject(Project(), url: nil, followsHighest: true)
+        replaceProject(Project(), url: nil, followsHighest: true, discardUntitledAutosave: false)
     }
 
-    private func replaceProject(_ p: Project, url: URL?, followsHighest: Bool) {
+    private func replaceProject(_ p: Project, url: URL?, followsHighest: Bool, discardUntitledAutosave: Bool) {
+        autosaver?.cancel()
+        if discardUntitledAutosave { document.discardUntitledAutosave() }
+        pendingProjectMode = false
         stopPlayers()
         visuals = [:]
         mode = .clip
@@ -312,24 +346,35 @@ final class ProjectViewModel {
 
     /// Called once at launch: offer the untitled project autosaved by an earlier run.
     func offerRestore() async {
-        guard !didOfferRestore, project.clips.isEmpty else { return }
+        guard !didOfferRestore else { return }
         didOfferRestore = true
+        defer {
+            restoreSettled = true
+            if !project.clips.isEmpty { autosaver?.noteChange() }
+        }
         guard let restored = await document.restorableProject() else { return }
+        // The user may have added files while the earlier project was probed.
+        let hasClips = !project.clips.isEmpty
         let alert = NSAlert()
         alert.messageText = "Restore your unsaved project?"
         alert.informativeText = "Slate found a project that was autosaved in an earlier session."
+            + (hasClips ? " Restoring replaces the project that is open now." : "")
         alert.addButton(withTitle: "Restore")
         alert.addButton(withTitle: "Discard")
         if alert.runModal() == .alertFirstButtonReturn {
-            replaceProject(restored, url: nil, followsHighest: false)
+            if hasClips { guard confirmDiscardChanges() else { return } }
+            replaceProject(restored, url: nil, followsHighest: false, discardUntitledAutosave: false)
             document.restoredUntitled()
             documentVersion += 1
+            autosaver?.noteChange()
         } else {
             document.discardUntitledAutosave()
         }
     }
 
     private func autosaveNow() throws {
+        // Until the launch restore offer is settled, an untitled autosave would overwrite the earlier session's.
+        if document.isUntitled && !restoreSettled { return }
         try document.autosave(project, revision: editor.revision)
         documentVersion += 1
     }
@@ -345,7 +390,7 @@ final class ProjectViewModel {
     func selectClip(_ id: UUID) {
         editor.selectClip(id)
         if mode == .project {
-            if let start = timeMap.firstOutputStart(of: id) { seekProject(start.cmTime) }
+            if let start = timeMap.firstOutputStart(of: id) { seekProject(cmTime(start, timescale: plan.outputTimescale)) }
             ensureVisuals(id)
         } else {
             syncClipPlayer()
@@ -427,6 +472,7 @@ final class ProjectViewModel {
 
     /// Esc: drop the pending in-point and the segment selection.
     func clearSelection() {
+        ensureClipMode()
         edit {
             $0.clearInPoint()
             $0.selectedSegmentID = nil
@@ -444,10 +490,12 @@ final class ProjectViewModel {
     }
 
     func dragEdge(id: UUID, edge: SlateCore.SegmentEdge, to time: CMTime) {
+        ensureClipMode()
         edit { $0.dragEdge(id: id, edge: edge, to: time) }
     }
 
     func endSegmentDrag() {
+        ensureClipMode()
         edit { $0.endSegmentDrag() }
     }
 
@@ -463,14 +511,22 @@ final class ProjectViewModel {
 
     // MARK: Frame rate
 
-    func setMixed() { edit { $0.useMixed() } }
-    func setConstant(_ d: Rational?) { edit { $0.useConstant(d) } }
+    func setMixed() {
+        ensureClipMode()
+        edit { $0.useMixed() }
+    }
+
+    func setConstant(_ d: Rational?) {
+        ensureClipMode()
+        edit { $0.useConstant(d) }
+    }
 
     // MARK: Players
 
     /// Make sure the selected clip's own player is loaded (source-file playback for trimming).
     private func syncClipPlayer() {
         guard clipLoadedID != editor.selectedClipID || clipLoadedURL != editor.selectedClip?.url else { return }
+        clipPlayer?.pause()
         if let (p, token) = clipObserver { p.removeTimeObserver(token) }
         clipObserver = nil
         clipLoadedID = editor.selectedClipID
@@ -498,7 +554,7 @@ final class ProjectViewModel {
         if isProject {
             projectTime = t
             // In Project mode the selection follows the playhead.
-            if mode == .project, let loc = timeMap.locate(Rational(t)), loc.clipID != editor.selectedClipID {
+            if mode == .project, let loc = timeMap.locate(quantized(t, timescale: plan.outputTimescale)), loc.clipID != editor.selectedClipID {
                 editor.selectClip(loc.clipID)
                 ensureVisuals(loc.clipID)
             }
@@ -508,6 +564,8 @@ final class ProjectViewModel {
     }
 
     private func stopPlayers() {
+        projectGeneration += 1
+        projectStale = true
         clipPlayer?.pause()
         projectPlayer?.pause()
         if let (p, token) = clipObserver { p.removeTimeObserver(token) }
@@ -521,11 +579,14 @@ final class ProjectViewModel {
     }
 
     func setMode(_ new: PlayerMode) {
+        if new == .clip { pendingProjectMode = false }
         guard new != mode else { return }
         switch new {
         case .clip:
             ensureClipMode()
         case .project:
+            guard !pendingProjectMode else { return }
+            pendingProjectMode = true
             clipPlayer?.pause()
             Task { await enterProjectMode() }
         }
@@ -533,19 +594,33 @@ final class ProjectViewModel {
 
     func toggleMode() { setMode(mode == .clip ? .project : .clip) }
 
+    private enum PreviewBuild { case ready, stale, failed }
+
     private func enterProjectMode() async {
-        await rebuildProjectPlayerIfNeeded()
-        guard projectPlayer != nil else { return }
+        defer { pendingProjectMode = false }
+        var result = PreviewBuild.stale
+        for _ in 0..<2 {
+            guard pendingProjectMode else { return }
+            result = await rebuildProjectPlayerIfNeeded()
+            if result != .stale { break }
+        }
+        guard pendingProjectMode else { return }
+        if result == .stale {
+            previewNote = "Preview unavailable: the project changed while the preview was being built."
+            return
+        }
+        guard result == .ready, projectPlayer != nil else { return }
         var start = Rational.zero
         if let id = editor.selectedClipID {
-            if clipTime.isNumeric, let t = timeMap.projectTime(clipID: id, sourceTime: Rational(clipTime)) {
+            let ts = sourceTimescale(of: id)
+            if clipTime.isNumeric, let t = timeMap.projectTime(clipID: id, sourceTime: quantized(clipTime, timescale: ts)) {
                 start = t
             } else if let first = timeMap.firstOutputStart(of: id) {
                 start = first
             }
         }
         mode = .project
-        seekProject(start.cmTime)
+        seekProject(cmTime(start, timescale: plan.outputTimescale))
     }
 
     /// Leave Project mode: pause, select the clip under the project playhead, load it, and seek it to
@@ -553,27 +628,32 @@ final class ProjectViewModel {
     func ensureClipMode() {
         guard mode == .project else { return }
         projectPlayer?.pause()
-        let location = projectTime.isNumeric ? timeMap.locate(Rational(projectTime)) : nil
+        let location = projectTime.isNumeric
+            ? timeMap.locate(quantized(projectTime, timescale: plan.outputTimescale)) : nil
         mode = .clip
         if let location { editor.selectClip(location.clipID) }
         syncClipPlayer()
-        if let location { seekClip(location.sourceTime.cmTime) }
+        if let location { seekClip(cmTime(location.sourceTime, timescale: sourceTimescale(of: location.clipID))) }
     }
 
     /// The Project player plays the same grid segments as the export (each at its output start).
     /// A clip whose audio is more than one AAC packet short makes the composition throw; the preview
     /// then falls back to video only and says so.
-    private func rebuildProjectPlayerIfNeeded() async {
-        guard projectStale || projectPlayer == nil, !isBuildingPreview else { return }
+    private func rebuildProjectPlayerIfNeeded() async -> PreviewBuild {
+        guard projectStale || projectPlayer == nil else { return .ready }
+        guard !isBuildingPreview else { return .failed }
         isBuildingPreview = true
         defer { isBuildingPreview = false }
         previewNote = nil
         let plan = self.plan
         let project = self.project
+        let revision = editor.revision
+        let generation = projectGeneration
+        func isCurrent() -> Bool { editor.revision == revision && projectGeneration == generation }
         guard plan.canExport else {
             previewNote = "Preview unavailable: " + ClipPresentation.blockerTexts(plan, project: project).joined(separator: " ")
             dropProjectPlayer()
-            return
+            return .failed
         }
         var assets: [UUID: AVAsset] = [:]
         for clip in project.clips { assets[clip.id] = AVURLAsset(url: clip.url) }
@@ -589,15 +669,19 @@ final class ProjectViewModel {
                 composition = try await CompositionBuilder.build(inserts: inserts, includeAudio: false,
                                                                  timescale: plan.outputTimescale)
             }
+            guard isCurrent() else { return .stale }
             dropProjectPlayer()
             let p = AVPlayer(playerItem: AVPlayerItem(asset: composition))
             p.actionAtItemEnd = .pause
             projectPlayer = p
             projectObserver = (p, makeObserver(for: p, isProject: true))
             projectStale = false
+            return .ready
         } catch {
+            guard isCurrent() else { return .stale }
             previewNote = "Preview unavailable: \(error.localizedDescription)"
             dropProjectPlayer()
+            return .failed
         }
     }
 
@@ -725,28 +809,35 @@ final class ProjectViewModel {
 
         let exporter = ProjectExporter()
         self.exporter = exporter
+        let token = UUID()
+        exportToken = token
         exportUI = .running(nil)
         let snapshot = project
         exportTask = Task { @MainActor in
+            @MainActor func finish(_ ui: ExportUI) {
+                guard self.exportToken == token else { return }
+                self.exportUI = ui
+            }
             do {
                 _ = try await exporter.export(
                     project: snapshot, outputURL: outURL, tempDirectory: FileManager.default.temporaryDirectory,
                     progress: { stage in
                         Task { @MainActor in
+                            guard self.exportToken == token else { return }
                             if case .running = self.exportUI { self.exportUI = .running(stage) }
                         }
                     })
-                self.exportUI = .done(outURL)
+                finish(.done(outURL))
             } catch ProjectExportError.validationFailed(let report) {
-                self.exportUI = .refused(report.issues)
+                finish(.refused(report.issues))
             } catch ProjectExportError.cancelled {
-                self.exportUI = .failed("Cancelled.")
+                finish(.failed("Cancelled."))
             } catch ReencodeError.clipAudioTruncated(let clipID, _) {
-                self.exportUI = .failed(self.audioShortMessage(clipID))
+                finish(.failed(self.audioShortMessage(clipID)))
             } catch CompositionError.audioTruncated(let clipID, _) {
-                self.exportUI = .failed(self.audioShortMessage(clipID))
+                finish(.failed(self.audioShortMessage(clipID)))
             } catch {
-                self.exportUI = .failed(error.localizedDescription)
+                finish(.failed(error.localizedDescription))
             }
         }
     }
@@ -760,6 +851,8 @@ final class ProjectViewModel {
     func cancelExport() { exporter?.cancel() }
 
     func dismissExport() {
+        if case .running = exportUI { exporter?.cancel() }
+        exportToken = nil
         exportUI = .idle
         exporter = nil
         exportTask = nil
