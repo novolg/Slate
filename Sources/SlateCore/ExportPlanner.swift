@@ -10,7 +10,9 @@ public enum BlockReason: Equatable {
     case missingFile
     case frameSizeMismatch
     case codecMismatch
+    case unsupportedCodec
     case audioMismatch
+    case audioFormatMismatch
 }
 
 public enum ClipAction: Equatable {
@@ -55,6 +57,8 @@ public struct ExportPlan: Equatable {
     /// The first readable clip. Every other clip must match its size, codec and audio.
     public let reference: ClipMedia?
     public let blockers: [PlanBlocker]
+    /// Mixed mode only, and only when the plan can export: the exact pts the output must decode to.
+    public let expectedPTS: [Rational]?
 
     public var canExport: Bool { blockers.isEmpty }
     public var hasAudio: Bool { reference?.hasAudio ?? false }
@@ -71,21 +75,40 @@ public struct ExportPlan: Equatable {
 }
 
 public enum ExportPlanner {
+    /// Codecs Slate can copy and re-encode into an `.mp4`. Anything else (e.g. ProRes) is blocked
+    /// in every mode, because `VideoEncodeSettings.matching` would turn it into H.264.
+    public static let supportedCodecs: Set<FourCharCode> = [fourCC("avc1"), fourCC("hvc1"), fourCC("hev1")]
+
     public static func plan(_ project: Project) -> ExportPlan {
-        let reference = project.clips.first { $0.media != nil }?.media
+        // The first readable clip with a supported codec is the reference for all others.
+        let reference = project.clips.first {
+            $0.media.map { supportedCodecs.contains($0.codec) } ?? false
+        }?.media
+
+        // Constant + Re-encode all converts every clip's audio to the reference rate/channels
+        // in ClipReencoder, so an audio format difference only blocks paths that copy.
+        var reencodesEverything = false
+        if case .constant = project.fpsMode, project.constantStrategy == .reencodeAll { reencodesEverything = true }
 
         var blocked: [UUID: BlockReason] = [:]
         for clip in project.clips {
-            guard let m = clip.media, let ref = reference else {
+            guard let m = clip.media else {
                 blocked[clip.id] = .missingFile
                 continue
             }
+            guard supportedCodecs.contains(m.codec) else {
+                blocked[clip.id] = .unsupportedCodec
+                continue
+            }
+            guard let ref = reference else { continue } // unreachable: m itself is a candidate
             if m.width != ref.width || m.height != ref.height {
                 blocked[clip.id] = .frameSizeMismatch
             } else if m.codec != ref.codec {
                 blocked[clip.id] = .codecMismatch
             } else if m.hasAudio != ref.hasAudio {
                 blocked[clip.id] = .audioMismatch
+            } else if m.audio != ref.audio && !reencodesEverything {
+                blocked[clip.id] = .audioFormatMismatch
             }
         }
 
@@ -144,9 +167,17 @@ public enum ExportPlanner {
         let timescale = outputTimescale(mode: project.fpsMode, required: requiredTimescales, optional: optionalTimescales)
         if timescale == nil { blockers.append(.timescaleOverflow) }
 
+        var expected: [Rational]?
+        if case .mixed = project.fpsMode, blockers.isEmpty {
+            var tables: [UUID: FrameTable] = [:]
+            for c in project.clips { if let m = c.media { tables[c.id] = m.frames } }
+            expected = ExpectedPTS.mixed(grid: grid.segments, tables: tables)
+        }
+
         return ExportPlan(mode: project.fpsMode, strategy: project.constantStrategy, clips: clipPlans,
                           grid: grid.segments, totalDuration: grid.totalDuration, totalFrames: grid.totalFrames,
-                          outputTimescale: timescale ?? 600, reference: reference, blockers: blockers)
+                          outputTimescale: timescale ?? 600, reference: reference, blockers: blockers,
+                          expectedPTS: expected)
     }
 
     static func decide(_ media: ClipMedia, mode: FPSMode, strategy: ConstantStrategy) -> ClipAction {
@@ -159,24 +190,15 @@ public enum ExportPlanner {
     /// Compute T_out: the lcm of d (in Constant mode) and every REQUIRED (copied) clip's timescale.
     /// Then optionally fold in each OPTIONAL timescale (re-encoded/skipped clips) one by one,
     /// keeping the fold only if the lcm exists and ≤ Int32.max; otherwise skip that timescale.
-    /// In Constant mode: overflow on required → return nil (blocker). In Mixed mode: overflow on
-    /// required → return largest required timescale (or 600 if none). Optional overflows never block.
+    /// In every mode an overflow on a required (copied) timescale returns nil (blocker); optional overflows never block.
     static func outputTimescale(mode: FPSMode, required: [Int32], optional: [Int32]) -> Int32? {
         var t: Int64 = 1
         if case .constant(let d) = mode { t = d.den }
 
-        // Required timescales: any overflow or overflow causes blocker
+        // Required (copied) timescales: no common multiple that fits Int32 → blocker, in every mode.
         for ts in required {
-            if let l = Rational.lcm(t, Int64(ts)) {
-                if l > Int64(Int32.max) {
-                    if case .mixed = mode { return required.max().map { Int32($0) } ?? 600 }
-                    return nil
-                }
-                t = l
-            } else {
-                if case .mixed = mode { return required.max().map { Int32($0) } ?? 600 }
-                return nil
-            }
+            guard let l = Rational.lcm(t, Int64(ts)), l <= Int64(Int32.max) else { return nil }
+            t = l
         }
 
         // Optional timescales: silently skip if overflow

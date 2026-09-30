@@ -40,13 +40,15 @@ public final class ProjectExporter: @unchecked Sendable {
     private var cancelled = false
     private var session: AVAssetExportSession?
     private var reencoder: ClipReencoder?
+    private var validationTask: Task<CadenceReport, Error>?
 
     /// Checks the staged file. Replaceable in checks to simulate a failed validation.
     public var validator: (URL, ExportPlan) async throws -> CadenceReport = { url, plan in
         try await CadenceValidator.validate(url: url, frameDuration: plan.frameDuration,
                                             expectedFrames: plan.totalFrames,
                                             expectedDuration: plan.totalDuration,
-                                            audioSampleRate: plan.audio?.sampleRate)
+                                            audioSampleRate: plan.audio?.sampleRate,
+                                            expectedPTS: plan.expectedPTS)
     }
 
     /// If set, a file that fails validation is saved here for inspection (Phase 0).
@@ -60,10 +62,19 @@ public final class ProjectExporter: @unchecked Sendable {
             cancelled = true
             session?.cancelExport()
             reencoder?.cancel()
+            validationTask?.cancel()
         }
     }
 
     private var isCancelled: Bool { lock.withLock { cancelled } }
+
+    private func runValidation(_ url: URL, _ plan: ExportPlan) async throws -> CadenceReport {
+        let task = Task { try await validator(url, plan) }
+        lock.withLock { validationTask = task }
+        defer { lock.withLock { validationTask = nil } }
+        if isCancelled { task.cancel() }
+        return try await task.value
+    }
 
     public func export(project: Project, outputURL: URL, tempDirectory: URL,
                        progress: @escaping @Sendable (ExportStage) -> Void) async throws -> CadenceReport {
@@ -92,7 +103,7 @@ public final class ProjectExporter: @unchecked Sendable {
                 try await render(plan: plan, project: project, output: staged, work: work, progress: progress)
                 if isCancelled { throw ProjectExportError.cancelled }
                 progress(.validating)
-                let report = try await validator(staged, plan)
+                let report = try await runValidation(staged, plan)
                 if isCancelled { throw ProjectExportError.cancelled }
                 guard report.ok else {
                     // Never replace the destination with a file that failed validation.
@@ -153,7 +164,7 @@ public final class ProjectExporter: @unchecked Sendable {
         for cp in plan.clips where !cp.segments.isEmpty {
             assets[cp.clipID] = AVURLAsset(url: clips[cp.clipID]!.url)
         }
-        let reference = plan.reference!
+        let encodeMedias = plan.clips.filter { !$0.segments.isEmpty }.compactMap { clips[$0.clipID]?.media }
 
         if let d = plan.frameDuration, plan.strategy == .reencodeAll {
             var jobs: [ReencodeJob] = []
@@ -162,8 +173,11 @@ public final class ProjectExporter: @unchecked Sendable {
                                                        frames: clips[cp.clipID]!.media!.frames,
                                                        segments: cp.segments))
             }
-            try await reencode(jobs, d: d, plan: plan, reference: reference, to: output) { p in
-                progress(.reencoding(clip: 1, of: 1, progress: p))
+            let counts = jobs.map { $0.segments.reduce(0) { $0 + $1.frameCount } }
+            let jobCount = jobs.count
+            try await reencode(jobs, d: d, plan: plan, medias: encodeMedias, to: output) { p in
+                progress(.reencoding(clip: ReencodeProgress.clipIndex(fraction: p, frameCounts: counts),
+                                     of: jobCount, progress: p))
             }
             return
         }
@@ -181,18 +195,21 @@ public final class ProjectExporter: @unchecked Sendable {
             case .copy:
                 inserts += try CompositionBuilder.inserts(for: cp.segments, assets: [cp.clipID: asset])
             case .reencode:
-                guard let d = plan.frameDuration else { continue }
+                guard let d = plan.frameDuration else {
+                    preconditionFailure("the planner never returns .reencode in Mixed mode")
+                }
                 reencoded += 1
                 let index = reencoded
                 let job = try await ReencodeJob.load(asset: asset, frames: clips[cp.clipID]!.media!.frames,
                                                      segments: cp.segments)
                 let tmp = work.appendingPathComponent("\(cp.clipID.uuidString).mp4")
-                try await reencode([job], d: d, plan: plan, reference: reference, to: tmp) { p in
+                try await reencode([job], d: d, plan: plan, medias: encodeMedias, to: tmp) { p in
                     progress(.reencoding(clip: index, of: reencodeCount, progress: p))
                 }
                 let total = cp.segments.reduce(Rational.zero) { $0 + $1.outputDuration }
                 inserts.append(CompositionInsert(asset: AVURLAsset(url: tmp), sourceStart: .zero,
-                                                 duration: total, outputStart: cp.segments[0].outputStart))
+                                                 duration: total, outputStart: cp.segments[0].outputStart,
+                                                 clipID: cp.clipID))
             case .skipped, .blocked:
                 continue
             }
@@ -205,14 +222,14 @@ public final class ProjectExporter: @unchecked Sendable {
         try await passthrough(comp, to: output) { progress(.assembling($0)) }
     }
 
-    private func reencode(_ jobs: [ReencodeJob], d: Rational, plan: ExportPlan, reference: ClipMedia,
+    private func reencode(_ jobs: [ReencodeJob], d: Rational, plan: ExportPlan, medias: [ClipMedia],
                           to url: URL, progress: @escaping @Sendable (Double) -> Void) async throws {
         let encoder = ClipReencoder()
         lock.withLock { reencoder = encoder }
         if isCancelled { encoder.cancel() }
         defer { lock.withLock { reencoder = nil } }
         try await encoder.encode(jobs: jobs, frameDuration: d, timescale: plan.outputTimescale,
-                                 video: .matching(reference), audio: plan.audio,
+                                 video: .matching(medias), audio: plan.audio,
                                  outputURL: url, progress: progress)
     }
 

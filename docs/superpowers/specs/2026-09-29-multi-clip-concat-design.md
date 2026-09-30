@@ -1,14 +1,15 @@
 # Multi-clip concat — design
 
 Date: 2026-09-29
-Status: approved by user 2026-09-29. Plan 1 (core + Phase 0) written; Plan 2 (UI) follows Phase 0
+Status: approved by user 2026-09-29. Plan 1 (core + Phase 0) done and merged to `main` 2026-09-30. Phase 0 decided. Plan 2 (UI) next. Where the section "Plan 2 decisions" contradicts older text, it wins.
 
 ## Goal
 
 Extend Slate from "trim one mp4" to "assemble many short clips into one mp4".
 Each clip can be trimmed with the existing multi-segment timeline (inner
-segments, edges, zoom). Export is one file, stream-copied (no re-encode) by
-default.
+segments, edges, zoom). Export is one file. A new project starts in Constant +
+Re-encode all (safe in AVFoundation and ffmpeg). Mixed mode stream-copies
+(no re-encode) and is opt-in, "Apple players only" (see "Plan 2 decisions").
 
 Primary use case: the user's AI generations from ComfyUI. Typical project is
 ~10 clips of ~5 s. Some clips are RIFE-interpolated (e.g. 24 → 48 fps, same
@@ -18,7 +19,8 @@ real-time speed, more frames). Retiming (slow-mo) is NOT wanted.
 
 - All clips in a project share resolution and codec.
 - Audio: within one project either all clips have audio or none do.
-- Output goes either to viewing/social (mixed fps is fine) or to an NLE
+- (Superseded: social/upload now routes to Constant; Mixed is Apple-only,
+  see "Plan 2 decisions".) Output goes either to viewing/social (mixed fps is fine) or to an NLE
   (needs constant fps). Both must be supported by a toggle.
 
 ## Non-goals
@@ -32,7 +34,8 @@ real-time speed, more frames). Retiming (slow-mo) is NOT wanted.
 
 - `Project`
   - `clips: [Clip]` — ordered.
-  - `fpsMode: FPSMode` — `.mixed` or `.constant(target: Double)`.
+  - `fpsMode: FPSMode` — `.mixed` or `.constant(frameDuration: Rational)`
+    (the `.slate` file stores the fraction).
   - Audio presence is derived from clips, not stored.
 - `Clip`
   - `id: UUID`
@@ -79,14 +82,16 @@ real-time speed, more frames). Retiming (slow-mo) is NOT wanted.
 Layout top→bottom: toolbar, player, clip strip, timeline of selected clip,
 status bar.
 
-- **Toolbar:** FPS toggle `Mixed / Constant [48 ▾]` (picker lists only fps
-  values present in the project, default = highest), total output duration,
+- **Toolbar:** FPS toggle `Constant [48 ▾] / Mixed` (picker lists only fps
+  values present in the project, default = highest; new projects start in
+  Constant — superseded order, see "Plan 2 decisions"), total output duration,
   Export button.
 - **Clip strip:** horizontal cards. Each card shows thumbnail, index, "kept /
   total" duration (e.g. `3.2 / 5.0 s`), fps badge, audio icon.
-  - fps badge is yellow whenever the current `ExportPlan` marks the clip as
-    `reencode`, for any reason: fps differs, frame timing not exact, or
-    "Re-encode all" is on. The tooltip shows the planner's reason.
+  - fps badge is yellow when the clip's own timing would not copy (fps
+    differs from the target, or frame timing not exact). The tooltip shows the
+    planner's reason. In Constant mode every clip is re-encoded, so the badge
+    does not show "Re-encode all" (superseded, see "Plan 2 decisions").
   - Card is red when the file is missing or its format differs from the rest.
   - Drag a card to reorder. Drop files from Finder into the strip at an
     insertion marker, or anywhere in the window (appends). `[+]` button and
@@ -267,6 +272,10 @@ ends. No gaps and no overlaps.
 
 #### Two strategies, one code path
 
+> Superseded: Phase 0 made **Re-encode all** the only visible strategy and
+> the default. Selective stays in code but is hidden. The "Re-encode
+> everything" checkbox is removed. See "Plan 2 decisions".
+
 - **Selective** (default if Phase 0 passes): re-encode only clips that fail
   copy eligibility (not exact CFR, or `srcD ≠ d`), then do a passthrough
   concat.
@@ -294,7 +303,9 @@ frames, which respects edit lists):
 - audio duration is within one AAC packet of the video duration.
 
 On failure the sheet shows which frames broke cadence. Mixed-mode export
-checks only frame count and total duration.
+checks frame count, total duration and (Plan 2) the exact expected pts list.
+A failed validation refuses the export in every mode (superseded: no
+"warning" path; see "Plan 2 decisions").
 
 #### Cleanup
 
@@ -302,12 +313,14 @@ Delete temp files on success, failure, and cancel.
 
 ### Progress and result
 
-- Stages: `Re-encoding k of n` → `Assembling`. Cancel works in both stages.
+- Stages: `Re-encoding k of n` → `Assembling` → `Validating`. Cancel works in
+  all stages. A failed validation refuses the export and the sheet shows why.
 - Default output name: `<project name>.mp4`. For an untitled single-clip
   project the old name stays `<basename> — trimmed.mp4`.
 - Post-export check: see Validation above. Constant mode runs the full
-  cadence check. Mixed mode checks frame count and total duration. A mismatch
-  shows a warning with details.
+  cadence check. Mixed mode checks frame count, total duration and the exact
+  pts list. A mismatch refuses the export and the sheet shows the details
+  (superseded: not a warning).
 
 ### Output safety
 
@@ -358,7 +371,23 @@ The NLE use case is a real requirement, so it is tested first.
    Selective becomes the default based on the automatic checks alone, and
    "Re-encode everything" stays available as the fallback. The record then
    says "NLE compatibility: UNVERIFIED", never "passed".
-4. Decision, recorded in `MASTER_PLAN.md`:
+
+**Phase 0 outcome (2026-09-30, generated fixtures only; NLE compatibility
+UNVERIFIED):**
+
+| Mode | AVFoundation validator | ffmpeg decode / pts order |
+|---|---|---|
+| Constant + Re-encode all (24, 48, audio) | pass | clean, monotonic |
+| Constant + Selective | 48 fails; 24 passes | 24: ~300 h264 errors, 107/130 frames |
+| Mixed (with/without audio) | pass (count + duration only) | 0 errors, pts go backwards at the 24 → 48 join (c48 part 1/16 s early) |
+
+Root cause: passthrough concat puts two different `avc1` format descriptions
+(level 3.0 vs 3.1) and mid-GOP edit lists in one track; ffmpeg mis-applies the
+second description's edits. Re-encode all writes one description, no
+B-frames, one edit list. Details: `docs/superpowers/handoffs/plan1-records/`.
+
+
+4. Decision, recorded in `MASTER_PLAN.md` (the outcome above applies it):
    - Selective passes → Selective is the default.
    - Selective fails, Re-encode all passes → Re-encode all is the default.
    - Both fail → stop and revisit the design before building UI.
@@ -366,26 +395,93 @@ The NLE use case is a real requirement, so it is tested first.
 The spike code is throwaway, but `FrameGrid`, `FrameRetimer`, and
 `CadenceValidator` are written as the real modules, so they carry over.
 
-## Code layout (new / changed)
+## Plan 2 decisions (2026-09-30, after Phase 0; these override earlier text)
 
-- `Models/Project.swift`, `Models/Clip.swift`, `Models/FPSMode.swift`
-- `Models/ProjectFile.swift` — Codable DTO + versioning
-- `Services/ClipProbe.swift` — loads clip metadata
-- `Services/ExportPlanner.swift` — pure
-- `Models/ProjectTimeMap.swift` — pure, project time ↔ (clip, source time)
-- `Services/FrameGrid.swift` — pure, kept segments → grid segments + offsets
-- `Services/FrameRetimer.swift` — pure
-- `Services/ClipReencoder.swift` — reader → retimer → writer (one clip, or
-  all clips into one writer)
-- `Services/CadenceValidator.swift` — reads output, checks frame timing
-- `Services/Exporter.swift` — takes an `ExportPlan` instead of one asset
-- `Services/Autosave.swift`
-- `ViewModels/ProjectViewModel.swift` — project, selection, undo, player mode.
-  Per-clip trim logic moves out of `EditorViewModel` so the existing
-  `TimelineView` binds to the selected clip.
-- `Views/ClipStripView.swift`, `Views/ClipStripMouseCapture.swift`
-- `Views/ExportSheet.swift` — shows the plan and stages
-- `Package.swift` — add `SlateCore` library + `SlateChecks` executable
+User rulings:
+
+1. **Mixed mode stays, labelled "Apple players only".** Exact label text:
+   "Apple players only (QuickTime, Safari, Final Cut). For upload or other
+   players use Constant." The export sheet shows it on Mixed. Gating Mixed
+   copy on identical format descriptions is deferred.
+2. **Selective is hidden** from the export sheet. The code stays in
+   `SlateCore`. Constant mode has one visible strategy: Re-encode all.
+   The "Re-encode everything" checkbox is removed.
+   `Project.constantStrategy` defaults to `.reencodeAll`. The v1 `.slate`
+   file does not store it. Checks: `Project().constantStrategy == .reencodeAll`;
+   the planner marks every clip of a default Constant project as re-encode.
+3. **New project default (user ruling 2026-09-30).** A new project starts in
+   Constant + Re-encode all, target = highest fps present. `Project.init`
+   default `fpsMode` changes from `.mixed` to Constant (the target is set
+   when clips are added). An empty project is `.constant(1/24)`. The target
+   follows "highest fps present" automatically until the user picks a value;
+   after that it is sticky. A loaded `.slate` keeps its stored target. Mixed
+   is opt-in. "Highest" compares exact
+   `d` values (e.g. `1001/24000` vs `1/24`).
+4. **Mixed gets exact pts validation.** Add a pure
+   `expectedPTS(grid:, tables:) -> [Rational]`. `CadenceValidator` compares
+   the decoded pts of a Mixed export to it exactly (no 1 ms tolerance).
+   Frame count and total duration stay as secondary messages.
+   - **Acceptance step, first task of Plan 2:** run the exact check on
+     `phase0-mixed.mp4`, `phase0-mixed-audio.mp4` and the `ex-mixed` checks.
+     Record pass/fail in `MASTER_PLAN.md`. If it fails, ruling 1 is reopened
+     (gate Mixed copy on identical format descriptions, or re-encode at
+     joins). No export-sheet work before this result.
+   - **Validation failure = export refused in every mode.** The sheet shows
+     the report. There is no "warning" path.
+   - **Mixed `T_out`:** if the lcm of the copied timescales overflows, the
+     planner blocks ("clip timescales cannot share one exact timeline"),
+     same as Constant. No silent fallback in `ExportPlanner.outputTimescale`
+     or `CompositionBuilder`. An exact grid always exists.
+
+Carry-over fixes (from the Plan 1 final reviews), done in Plan 2:
+
+- `ExportPlanner` blocks audio sample-rate / channel mismatch on copy paths.
+- `ExportPlanner` blocks unsupported codecs in every mode (allowed: `avc1`,
+  `hvc1`/`hev1`; e.g. ProRes is blocked) instead of
+  `VideoEncodeSettings.matching` turning them into H.264.
+- `ClipProbe` throws on an unreadable video or audio format description
+  (today: codec `0` / silent "no audio").
+- `SlateChecks` gets `--strict` (skips fail the run). `Phase0` removes a stale
+  `*-INVALID.mp4` before exporting. The unreachable guard at
+  `ProjectExporter.swift:184` becomes `preconditionFailure`.
+- Other deferred minors: `plan1-records/final-review-fable.md` §Minor and
+  `plan1-records/final-rereview-fable.md`.
+- Re-encode all bitrate = maximum over all clips, not the reference clip.
+- Re-encode all progress reports the real clip index ("Re-encoding k of n").
+- `CompositionBuilder` gets the audio-shortfall bound (1024 samples, one AAC
+  packet, same as `ClipReencoder`); `audioTruncated` names the clip.
+- Validation is interruptible by cancel.
+- Silence buffers reuse the reader's format description (channel layout).
+- The fps picker lists the `srcD` values of exact-CFR clips. If there are
+  none (e.g. only jittered 23.976), it falls back to
+  `Rational.frameDuration(fps: nominalFPS)` per clip, and the plan row says
+  "timing not exact".
+- Export-sheet plan rows mention audio format differences.
+
+NLE compatibility (DaVinci Resolve) stays UNVERIFIED until the user tests
+the finished app.
+
+## Code layout (updated 2026-09-30)
+
+Already exists in `Sources/SlateCore/` (Plan 1, do not duplicate):
+`Rational`, `FrameTable`, `Segment`, `KeyframeIndex`, `ProjectModel`
+(`Project`, `Clip`, `ClipMedia`, `FPSMode`, `ConstantStrategy`), `FrameGrid`,
+`ExportPlanner`, `FrameRetimer`, `ProjectTimeMap`, `ClipProbe`,
+`CadenceValidator`, `CompositionBuilder`, `ClipReencoder`, `ProjectExporter`.
+`Package.swift` already has `SlateCore` and `SlateChecks`.
+
+New in Plan 2:
+- `Sources/SlateCore/ProjectFile.swift` — Codable DTO + versioning (`.slate`)
+- `Sources/SlateCore/Autosave.swift`
+- `Sources/Slate/ViewModels/ProjectViewModel.swift` — project, selection,
+  undo, player mode. Per-clip trim logic moves out of `EditorViewModel` so
+  the existing `TimelineView` binds to the selected clip.
+- `Sources/Slate/Views/ClipStripView.swift`, `ClipStripMouseCapture.swift`
+- `Sources/Slate/Views/ExportSheet.swift` — exists (old single-clip sheet);
+  rewritten to show the plan and stages
+
+Replaced in Plan 2: the old single-clip `Sources/Slate/Services/Exporter.swift`
+and `EditorViewModel` flow (the app now calls `ProjectExporter`).
 
 ## Testing
 

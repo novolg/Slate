@@ -47,4 +47,29 @@ func runCompositionChecks() async {
         let starts = track.segments.filter { !$0.isEmpty }.map { Rational($0.timeMapping.target.start) }
         expectEqual(starts, plan.grid.map(\.outputStart))
     }
+
+    await checkAsync("composition: an insert that is not a whole number of ticks throws instead of rounding") {
+        let asset = AVURLAsset(url: try fixture("c24.mp4"))
+        let ins = CompositionInsert(asset: asset, sourceStart: .zero, duration: Rational(1), outputStart: Rational(1, 7))
+        do {
+            _ = try await CompositionBuilder.build(inserts: [ins], includeAudio: false, timescale: 600)
+            expect(false, "expected offGrid")
+        } catch CompositionError.offGrid(let at) {
+            expectEqual(at, Rational(1, 7))
+        }
+    }
+
+    await checkAsync("composition: audio more than one AAC packet short throws and names the clip") {
+        let a = try await loadClip("c24_trunc_a.mp4", keep: [(0, 5)])
+        let plan = ExportPlanner.plan(Project(clips: [a], fpsMode: .mixed))
+        do {
+            _ = try await CompositionBuilder.build(
+                inserts: CompositionBuilder.inserts(for: plan.grid, assets: [a.id: AVURLAsset(url: a.url)]),
+                includeAudio: true, timescale: plan.outputTimescale)
+            expect(false, "expected audioTruncated")
+        } catch CompositionError.audioTruncated(let clip, let seconds) {
+            expectEqual(clip, a.id)
+            expect(seconds > 0.4 && seconds < 0.6, "seconds \(seconds)")
+        }
+    }
 }

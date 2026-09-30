@@ -19,7 +19,7 @@ private func reencode(_ clip: Clip, to d: Rational, name: String) async throws -
 /// duration), both exact `Rational`. Used where `CadenceValidator.audioIssues`' one-AAC-
 /// packet tolerance (1024 samples) is too loose — the I1 regression check needs the
 /// output's audio end to match the video end within one sample.
-private func preciseAudioRange(_ url: URL) async throws -> (first: Rational, end: Rational) {
+func preciseAudioRange(_ url: URL) async throws -> (first: Rational, end: Rational) {
     let asset = AVURLAsset(url: url)
     guard let track = try await asset.loadTracks(withMediaType: .audio).first else {
         throw ReencodeError.cannotStartReader("no audio track")
@@ -231,4 +231,64 @@ func runReencoderChecks() async {
         expect(report.ok, "\(report.issues)")
         try await assertNoFrameReordering(out)
     }
+
+    check("progress: the clip index follows the written frames") {
+        let counts = [24, 48]
+        expectEqual(ReencodeProgress.clipIndex(fraction: 0, frameCounts: counts), 1)
+        expectEqual(ReencodeProgress.clipIndex(fraction: 23.0 / 72.0, frameCounts: counts), 1)
+        expectEqual(ReencodeProgress.clipIndex(fraction: 24.0 / 72.0, frameCounts: counts), 2)
+        expectEqual(ReencodeProgress.clipIndex(fraction: 1, frameCounts: counts), 2)
+        expectEqual(ReencodeProgress.clipIndex(fraction: 0, frameCounts: [0, 10]), 2)
+        expectEqual(ReencodeProgress.clipIndex(fraction: 0.5, frameCounts: []), 1)
+    }
+
+    check("encoder settings: bitrate comes from the fastest clip, not the first") {
+        let lo = TestData.media(TestData.c24)
+        var hi = TestData.media(TestData.c24)
+        hi.estimatedDataRate = 30_000_000
+        let mixed = VideoEncodeSettings.matching([lo, hi])
+        expectEqual(mixed.bitsPerSecond, VideoEncodeSettings.matching(hi).bitsPerSecond)
+        expect(mixed.bitsPerSecond > VideoEncodeSettings.matching(lo).bitsPerSecond)
+        expectEqual(mixed.codec, VideoEncodeSettings.matching(lo).codec)
+    }
+
+    await checkAsync("exporter: Re-encode all reports the real clip index") {
+        let a = try await loadClip("c24.mp4", keep: [(0.5, 1.5)])
+        let b = try await loadClip("c48.mp4", keep: [(0.5, 1.5)])
+        let out = try checksOutputDirectory().appendingPathComponent("ex-progress-index.mp4")
+        let seen = SeenClips()
+        _ = try await ProjectExporter().export(project: Project(clips: [a, b]), outputURL: out,
+                                               tempDirectory: try checksOutputDirectory(), progress: { stage in
+            if case .reencoding(let k, let n, _) = stage { seen.add(k, of: n) }
+        })
+        expectEqual(seen.of, 2)
+        expect(seen.indices.contains(1) && seen.indices.contains(2), "saw \(seen.indices)")
+    }
+
+    await checkAsync("reencoder: stereo short audio is padded and the export still ends with the video") {
+        let a = try await loadClip("c24_st_short_a.mp4", keep: [(0, 5.0)])
+        let b = try await loadClip("c24_st_short_a.mp4", keep: [(0, 5.0)])
+        expectEqual(a.media?.audio?.channels, 2)
+        let project = Project(clips: [a, b])
+        let plan = ExportPlanner.plan(project)
+        expect(plan.canExport, "\(plan.blockers)")
+        let out = try checksOutputDirectory().appendingPathComponent("re-stereo-short-audio.mp4")
+        let report = try await ProjectExporter().export(project: project, outputURL: out,
+                                                        tempDirectory: try checksOutputDirectory(), progress: { _ in })
+        expect(report.ok, "\(report.issues)")
+        let rate = Int64((plan.audio?.sampleRate ?? 44100).rounded())
+        let (first, end) = try await preciseAudioRange(out)
+        expect(first.magnitude <= Rational(1024, rate), "first audio sample at \(first.seconds) s")
+        expect((end - plan.totalDuration).magnitude <= Rational(1, rate),
+               "audio ends at \(end.seconds) s, video at \(plan.totalDuration.seconds) s")
+    }
+}
+
+final class SeenClips: @unchecked Sendable {
+    private let lock = NSLock()
+    private var set = Set<Int>()
+    private var total = 0
+    func add(_ k: Int, of n: Int) { lock.withLock { set.insert(k); total = n } }
+    var indices: Set<Int> { lock.withLock { set } }
+    var of: Int { lock.withLock { total } }
 }

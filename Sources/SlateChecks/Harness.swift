@@ -6,6 +6,7 @@ enum Harness {
     static var failed = 0
     static var skipped = 0
     static var filter: String?
+    static var strict = false
     static var currentFailed = false
 
     static func shouldRun(_ name: String) -> Bool {
@@ -15,7 +16,9 @@ enum Harness {
 
     static func finish() -> Never {
         print("\n\(passed) passed, \(failed) failed, \(skipped) skipped")
-        exit(failed == 0 ? 0 : 1)
+        let strictFailure = strict && skipped > 0
+        if strictFailure { print("--strict: \(skipped) skipped check(s) count as a failure") }
+        exit(failed == 0 && !strictFailure ? 0 : 1)
     }
 }
 

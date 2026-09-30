@@ -8,7 +8,7 @@ func runPlannerChecks() {
     check("planner: constant 24 copies exact 24 and re-encodes 48") {
         let a = TestData.clip(TestData.media(TestData.c24), keep: whole)
         let b = TestData.clip(TestData.media(TestData.c48), keep: whole)
-        let plan = ExportPlanner.plan(Project(clips: [a, b], fpsMode: d24))
+        let plan = ExportPlanner.plan(Project(clips: [a, b], fpsMode: d24, constantStrategy: .selective))
         expect(plan.canExport, "\(plan.blockers)")
         expectEqual(plan.plan(for: a.id)?.action, .copy)
         expectEqual(plan.plan(for: b.id)?.action, .reencode(.fpsDiffers))
@@ -19,7 +19,7 @@ func runPlannerChecks() {
     check("planner: jittered 23.976 re-encodes in constant, copies in mixed") {
         let jit = TestData.jittered23976(count: 240)
         let c = TestData.clip(TestData.media(jit), keep: [(.zero, jit.clipEnd)])
-        let constant = ExportPlanner.plan(Project(clips: [c], fpsMode: .constant(frameDuration: Rational(1001, 24000))))
+        let constant = ExportPlanner.plan(Project(clips: [c], fpsMode: .constant(frameDuration: Rational(1001, 24000)), constantStrategy: .selective))
         expectEqual(constant.plan(for: c.id)?.action, .reencode(.timingNotExact))
         expectEqual(constant.outputTimescale, 360000)
         let mixed = ExportPlanner.plan(Project(clips: [c], fpsMode: .mixed))
@@ -29,7 +29,7 @@ func runPlannerChecks() {
     check("planner: drift clip (3754 then 3753 ticks) re-encodes in constant") {
         let drift = TestData.drift(first: 3754, second: 3753, count: 100)
         let c = TestData.clip(TestData.media(drift), keep: [(.zero, drift.clipEnd)])
-        let plan = ExportPlanner.plan(Project(clips: [c], fpsMode: .constant(frameDuration: Rational(1001, 24000))))
+        let plan = ExportPlanner.plan(Project(clips: [c], fpsMode: .constant(frameDuration: Rational(1001, 24000)), constantStrategy: .selective))
         expectEqual(plan.plan(for: c.id)?.action, .reencode(.timingNotExact))
     }
 

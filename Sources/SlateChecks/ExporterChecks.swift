@@ -21,6 +21,16 @@ func runExporterChecks() async {
         expect(report.ok, "\(report.issues)")
     }
 
+    await checkAsync("exporter: mixed j23976 + c24 copies everything") {
+        let a = try await loadClip("j23976.mp4", keep: [(0.5, 2.5)])
+        let b = try await loadClip("c24.mp4", keep: [(0.7, 2.3)])
+        let (report, plan) = try await exportProject(Project(clips: [a, b], fpsMode: .mixed), name: "ex-mixed-j23976.mp4")
+        expect(plan.canExport, "\(plan.blockers)")
+        for cp in plan.clips { expectEqual(cp.action, ClipAction.copy) }
+        expectEqual(plan.outputTimescale, 23_040_000)
+        expect(report.ok, "\(report.issues)")
+    }
+
     await checkAsync("exporter: mixed 24 + 48 with audio") {
         let a = try await loadClip("c24_a.mp4", keep: [(0.7, 2.3), (3.1, 4.4)])
         let b = try await loadClip("c48_a.mp4", keep: [(1.05, 3.6)])
@@ -258,6 +268,19 @@ func runExporterChecks() async {
             // expected: an already-cancelled instance stays cancelled forever
         }
         expect(!FileManager.default.fileExists(atPath: out.path), "a cancelled instance must not write a file")
+    }
+
+    await checkAsync("exporter: re-encode all mixes 44.1 kHz and 48 kHz audio") {
+        let a = try await loadClip("c24_a.mp4", keep: [(0.5, 2.0)])
+        let b = try await loadClip("c24_48k_a.mp4", keep: [(0.5, 2.0)])
+        let (report, plan) = try await exportProject(Project(clips: [a, b]), name: "ex-mixed-rates-all.mp4")
+        expect(plan.canExport, "\(plan.blockers)")
+        expect(report.ok, "\(report.issues)")
+        let out = try checksOutputDirectory().appendingPathComponent("ex-mixed-rates-all.mp4")
+        let rate = Int64((plan.audio?.sampleRate ?? 44100).rounded())
+        let (_, end) = try await preciseAudioRange(out)
+        expect((end - plan.totalDuration).magnitude <= Rational(1, rate),
+               "audio ends at \(end.seconds) s, video at \(plan.totalDuration.seconds) s")
     }
 }
 
