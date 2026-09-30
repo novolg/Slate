@@ -181,7 +181,9 @@ public final class ProjectExporter: @unchecked Sendable {
             case .copy:
                 inserts += try CompositionBuilder.inserts(for: cp.segments, assets: [cp.clipID: asset])
             case .reencode:
-                guard let d = plan.frameDuration else { continue }
+                guard let d = plan.frameDuration else {
+                    preconditionFailure("the planner never returns .reencode in Mixed mode")
+                }
                 reencoded += 1
                 let index = reencoded
                 let job = try await ReencodeJob.load(asset: asset, frames: clips[cp.clipID]!.media!.frames,

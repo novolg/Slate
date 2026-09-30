@@ -1,8 +1,12 @@
 import Foundation
 
-let arguments = Array(CommandLine.arguments.dropFirst())
+var arguments = Array(CommandLine.arguments.dropFirst())
 if arguments.first == "phase0" {
     exit(await Phase0.run(arguments: Array(arguments.dropFirst())))
+}
+if let i = arguments.firstIndex(of: "--strict") {
+    Harness.strict = true
+    arguments.remove(at: i)
 }
 Harness.filter = arguments.first
 

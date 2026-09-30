@@ -68,8 +68,10 @@ enum Phase0 {
                 let actions = plan.clips.map { "\($0.action)" }.joined(separator: ", ")
                 // A file that fails validation is kept as *-INVALID.mp4 for ffprobe/Resolve.
                 let exporter = ProjectExporter()
-                exporter.keepInvalidAt = outDir.appendingPathComponent(
+                let invalidURL = outDir.appendingPathComponent(
                     c.file.replacingOccurrences(of: ".mp4", with: "-INVALID.mp4"))
+                try? FileManager.default.removeItem(at: invalidURL)
+                exporter.keepInvalidAt = invalidURL
                 do {
                     let report = try await exporter.export(
                         project: project, outputURL: outDir.appendingPathComponent(c.file),
