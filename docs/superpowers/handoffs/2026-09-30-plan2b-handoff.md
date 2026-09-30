@@ -2,7 +2,7 @@
 
 Date: 2026-09-30. Written after Plan 2A (branch `feat/multi-clip-2a`). Read this, then `MASTER_PLAN.md`, then the spec (section "Plan 2 decisions" wins), then `docs/superpowers/plans/2026-09-30-multi-clip-core-fixes-and-project-file.md` (what 2A did).
 
-## 1. What 2A delivered (all in `Sources/SlateCore`, 120/120 checks with `--strict`)
+## 1. What 2A delivered (all in `Sources/SlateCore`, 125/125 checks with `--strict`)
 
 - Defaults: `Project()` = `.constant(frameDuration: 1/24)` + `.reencodeAll`. `FrameRateChoice.candidates(for:)` (unique `d`, fastest first) and `.highest(for:)`.
 - Planner: `BlockReason.unsupportedCodec` (allowed avc1/hvc1/hev1), `.audioFormatMismatch`; reference clip = first readable supported clip; Mixed timescale overflow → `PlanBlocker.timescaleOverflow`.
@@ -27,7 +27,8 @@ Date: 2026-09-30. Written after Plan 2A (branch `feat/multi-clip-2a`). Read this
 ## 3. Deferred items to carry (from the 2A ledger — none blocks 2B)
 
 - 2B must decide how the view model builds `Segment`s so `ProjectFile.init` never sees a non-numeric `CMTime` (it traps on save).
-- `Autosaver` now serialises writes and `flush()` waits for a running write; the write closure must still snapshot the state at write time.
+- `Autosaver` now serialises writes and `flush()` waits for a running write; the write closure must still snapshot the state at write time. The write closure must capture its owner WEAKLY (a strong capture keeps the Autosaver alive and `deinit` never cancels the timer). Before `UntitledAutosaveStore.discard()` call `flush()` or wait for the last write, because a timer write that already started can still land after `discard()`.
+- The 48 kHz export check does not assert the output audio rate directly (only end alignment); add that assertion when the export sheet gets audio rows.
 - `CompositionBuilder.build` is also the Project preview path; a clip whose audio ends more than 1024 samples before its video now makes the build throw. 2B needs a tolerant or catch path for the preview (video-only preview or a clear card message).
 - `ProjectFile.decode` does not reject duplicate clip ids (the planner blocks them, but SwiftUI Identifiable lists misbehave): reject or de-duplicate on load in 2B.
 - `ProjectFile.init` traps on a non-numeric `CMTime` and autosave calls it on a timer: 2B's first view-model task must validate segments at creation or make `init` throwing.
