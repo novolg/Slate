@@ -1,49 +1,96 @@
 import Foundation
 
 /// Debounced autosave. Call `noteChange()` after every edit; the write runs once, `delay` after the last change.
+///
+/// Writes never overlap: each one first awaits the previously started write, so the last
+/// write to reach the disk is the last one started. `flush()` is therefore always final.
 public final class Autosaver: @unchecked Sendable {
+    /// Shared state. The timer task captures this (never `self`), so a dropped Autosaver
+    /// can deinit and cancel its pending timer.
+    private final class State: @unchecked Sendable {
+        let write: @Sendable () async throws -> Void
+        let onError: @Sendable (Error) -> Void
+        let lock = NSLock()
+        var pending: Task<Void, Never>?
+        var inFlight: Task<Void, Never>?
+
+        init(write: @escaping @Sendable () async throws -> Void, onError: @escaping @Sendable (Error) -> Void) {
+            self.write = write
+            self.onError = onError
+        }
+
+        /// Start a write after the previous one. Caller holds `lock`.
+        func startWriteLocked(swallowCancellation: Bool) -> Task<Void, Never> {
+            let previous = inFlight
+            let task = Task { [write, onError] in
+                await previous?.value
+                do {
+                    try await write()
+                } catch is CancellationError where swallowCancellation {
+                    // replaced by a newer change or a flush
+                } catch {
+                    onError(error)
+                }
+            }
+            inFlight = task
+            return task
+        }
+
+        func cancelPending() {
+            lock.withLock {
+                pending?.cancel()
+                pending = nil
+            }
+        }
+    }
+
     private let delay: Duration
-    private let write: @Sendable () async throws -> Void
-    private let onError: @Sendable (Error) -> Void
-    private let lock = NSLock()
-    private var pending: Task<Void, Never>?
+    private let state: State
 
     public init(delay: Duration, write: @escaping @Sendable () async throws -> Void,
                 onError: @escaping @Sendable (Error) -> Void = { _ in }) {
         self.delay = delay
-        self.write = write
-        self.onError = onError
+        self.state = State(write: write, onError: onError)
+    }
+
+    deinit {
+        state.cancelPending()
     }
 
     public func noteChange() {
-        let task = Task { [delay, write, onError] in
+        let state = self.state
+        let task = Task { [delay] in
             do {
                 try await Task.sleep(for: delay)
-                try Task.checkCancellation()
-                try await write()
-            } catch is CancellationError {
-                // a newer change or flush/cancel replaced this write
             } catch {
-                onError(error)
+                return // a newer change or flush/cancel replaced this write
             }
+            // Decide and register under the lock, so a concurrent flush() either cancels us
+            // first (we skip) or sees our write in flight (and waits for it).
+            let write: Task<Void, Never>? = state.lock.withLock {
+                Task.isCancelled ? nil : state.startWriteLocked(swallowCancellation: true)
+            }
+            await write?.value
         }
-        lock.withLock {
-            pending?.cancel()
-            pending = task
+        state.lock.withLock {
+            state.pending?.cancel()
+            state.pending = task
         }
     }
 
     /// Write now (for example on quit or before Save As) and drop the pending timer.
+    /// Waits for a write that is already running; this write lands after it.
     public func flush() async {
-        cancel()
-        do { try await write() } catch { onError(error) }
+        let task: Task<Void, Never> = state.lock.withLock {
+            state.pending?.cancel()
+            state.pending = nil
+            return state.startWriteLocked(swallowCancellation: false)
+        }
+        await task.value
     }
 
     public func cancel() {
-        lock.withLock {
-            pending?.cancel()
-            pending = nil
-        }
+        state.cancelPending()
     }
 }
 

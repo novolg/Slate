@@ -9,6 +9,13 @@ final class WriteCounter: @unchecked Sendable {
     var count: Int { lock.withLock { n } }
 }
 
+final class EventLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var items: [String] = []
+    func add(_ s: String) { lock.withLock { items.append(s) } }
+    var events: [String] { lock.withLock { items } }
+}
+
 func runAutosaveChecks() async {
     await checkAsync("autosave: many quick changes write once, after the delay") {
         let counter = WriteCounter()
@@ -48,6 +55,33 @@ func runAutosaveChecks() async {
         saver.noteChange()
         try await Task.sleep(nanoseconds: 300_000_000)
         expectEqual(errors.count, 1)
+    }
+
+    await checkAsync("autosave: flush waits for a running timer write and its write lands last") {
+        let log = EventLog()
+        let calls = WriteCounter()
+        let saver = Autosaver(delay: .milliseconds(30), write: {
+            calls.hit()
+            let n = calls.count
+            log.add("start\(n)")
+            if n == 1 { try await Task.sleep(nanoseconds: 200_000_000) }
+            log.add("end\(n)")
+        })
+        saver.noteChange()
+        try await Task.sleep(nanoseconds: 80_000_000)
+        await saver.flush()
+        expectEqual(log.events, ["start1", "end1", "start2", "end2"])
+        expectEqual(calls.count, 2)
+    }
+
+    await checkAsync("autosave: a dropped Autosaver writes nothing") {
+        let counter = WriteCounter()
+        do {
+            let saver = Autosaver(delay: .milliseconds(100), write: { counter.hit() })
+            saver.noteChange()
+        }
+        try await Task.sleep(nanoseconds: 300_000_000)
+        expectEqual(counter.count, 0)
     }
 
     check("autosave: untitled store saves, restores and discards; a corrupt file is ignored") {
