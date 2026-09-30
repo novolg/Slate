@@ -117,6 +117,7 @@ struct ClipStripView: View {
             reorderMarker = nil
         }
         guard dragging, let from = pressIndex, let insert = reorderMarker else { return }
+        guard clips.indices.contains(from) else { return }
         let final = insert > from ? insert - 1 : insert
         if final != from { vm.moveClip(clips[from].id, to: final) }
     }
