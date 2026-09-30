@@ -70,7 +70,7 @@ struct ProjectExportSheet: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             .frame(maxHeight: 220)
-            ForEach(blockers, id: \.self) { text in
+            ForEach(Array(blockers.enumerated()), id: \.offset) { _, text in
                 Text(text).font(.callout).foregroundStyle(.red)
             }
             HStack {
