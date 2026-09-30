@@ -91,7 +91,9 @@ public enum FrameRateChoice {
         let medias = clips.compactMap(\.media)
         var exact = medias.compactMap { $0.frames.exactFrameDuration }
         if exact.isEmpty {
-            exact = medias.map { Rational.frameDuration(fps: $0.nominalFPS) }
+            // A zero, NaN or infinite nominal fps has no frame duration; skip it (and never trap).
+            exact = medias.compactMap { $0.nominalFPS.isFinite && $0.nominalFPS > 0
+                ? Rational.frameDuration(fps: $0.nominalFPS) : nil }
         }
         return Array(Set(exact)).sorted()
     }

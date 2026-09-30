@@ -43,4 +43,19 @@ func runModelChecks() {
         let a = TestData.clip(TestData.media(TestData.c24), keep: whole)
         expectEqual(FrameRateChoice.candidates(for: [jit, a]), [Rational(1, 24)])
     }
+
+    check("model: picker ignores jittered clips with an unusable nominal fps") {
+        func jitter(_ fps: Double) -> Clip {
+            var m = TestData.media(TestData.jittered23976(count: 240))
+            m.nominalFPS = fps
+            return TestData.clip(m, keep: [(.zero, Rational(5))])
+        }
+        for bad in [0.0, Double.nan, Double.infinity, -24.0] {
+            expectEqual(FrameRateChoice.candidates(for: [jitter(bad)]), [], "\(bad)")
+            expectEqual(FrameRateChoice.highest(for: [jitter(bad)]), nil, "\(bad)")
+        }
+        let good = jitter(24000.0 / 1001.0)
+        expectEqual(FrameRateChoice.candidates(for: [jitter(0), jitter(.nan), jitter(.infinity), good]),
+                    [Rational(1001, 24000)])
+    }
 }
