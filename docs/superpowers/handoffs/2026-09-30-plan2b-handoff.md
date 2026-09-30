@@ -27,7 +27,11 @@ Date: 2026-09-30. Written after Plan 2A (branch `feat/multi-clip-2a`). Read this
 ## 3. Deferred items to carry (from the 2A ledger — none blocks 2B)
 
 - 2B must decide how the view model builds `Segment`s so `ProjectFile.init` never sees a non-numeric `CMTime` (it traps on save).
-- The `Autosaver` write closure must read the latest state at write time (writes are not serialised; a flush can overlap a timer write).
+- `Autosaver` now serialises writes and `flush()` waits for a running write; the write closure must still snapshot the state at write time.
+- `CompositionBuilder.build` is also the Project preview path; a clip whose audio ends more than 1024 samples before its video now makes the build throw. 2B needs a tolerant or catch path for the preview (video-only preview or a clear card message).
+- `ProjectFile.decode` does not reject duplicate clip ids (the planner blocks them, but SwiftUI Identifiable lists misbehave): reject or de-duplicate on load in 2B.
+- `ProjectFile.init` traps on a non-numeric `CMTime` and autosave calls it on a timer: 2B's first view-model task must validate segments at creation or make `init` throwing.
+- Audio-format differences (sample rate / channel count) are allowed in Constant + Re-encode all (converted by the reader) and blocked in Mixed and Constant + Selective; the export sheet rows should say so.
 - `ClipProbe` throws on unreadable formats; a card should show that as a broken file, not a "format mismatch".
 - `CompositionBuilder` treats an audio track whose `.timeRange` starts late as a shortfall (bound: 1024 samples). Unverified on real ComfyUI clips: if a real clip is refused, look here first.
 - `ClipReencoder.swift:200` keeps a `?? cmTime` rounding fallback (unreachable given `T_out`).
