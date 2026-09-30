@@ -1,6 +1,6 @@
 # Slate multi-clip — manual smoke test (about 15 minutes)
 
-Status when written: `swift build` is clean, `swift run SlateChecks --strict` gives 156 passed / 0 failed / 0 skipped, `scripts/build-app.sh` builds `build/Slate.app`. The GUI has never been run.
+Status when written: `swift build` is clean, `swift run SlateChecks --strict` gives 160 passed / 0 failed / 0 skipped, `scripts/build-app.sh` builds `build/Slate.app`. The GUI has never been run.
 
 Fixtures are in `build/fixtures` (run `scripts/make-test-clips.sh` first if they are missing; it needs Homebrew ffmpeg). Start the app from your own terminal: `open build/Slate.app`.
 
@@ -45,5 +45,5 @@ These were not verified by running the app. Report any that misbehave.
 - Menu enable/disable refresh: do Export…, Undo/Redo and the Clip menu items grey and un-grey immediately as the project changes?
 - Project-mode dimming of the timeline: in Project mode the timeline should look inactive; check it is clear and that clicks do the sensible thing.
 - Drag feel of timeline edges (3 pt threshold): is a click on an edge ignored and a real drag smooth, without jumps?
-- Fn+Delete should delete the selected segment but may not.
-- Tab and Backspace may also act while a panel (open/save/locate) is open.
+- Verify that Fn+Delete deletes the selected segment (the code handles it; only a run can confirm).
+- Verify that Tab and Backspace do nothing while a panel (open/save/locate) or alert is open (the code handles it; only a run can confirm).

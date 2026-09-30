@@ -14,5 +14,4 @@ Triaged by the final reviewer: everything below is carry (not blocking). Dropped
 
 ## Residual Important (not fixed in the run)
 
-- `ProjectEditor.resumeConstant()` falls back to a fixed 1/24 when `lastConstantTarget` is nil (a project loaded or restored in Mixed with `targetFollowsHighest == false`). Fix: `useConstant(lastConstantTarget)` (nil = follow the highest), plus a check: a Mixed project loaded with `targetFollowsHighest: false` and a 48 fps clip, then `resumeConstant()` gives 1/48.
-- Smoke-test doc: the header still says 156 checks (now 159); the "Known rough edges" lines about Fn+Delete and Tab/Backspace with a panel open should become "verify" items because the code now handles them.
+- Fixed in 4896497 (`ProjectEditor.resumeConstant()` fell back to a fixed 1/24 when no constant target was known).
