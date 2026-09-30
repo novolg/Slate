@@ -238,9 +238,11 @@ public struct ProjectEditor: Equatable {
         changed()
     }
 
-    /// Mixed -> Constant: follow the highest again if that was the policy, else restore the last pick.
+    /// Mixed -> Constant: restore the last picked target if one is known and the policy is sticky;
+    /// otherwise (following the highest, or no constant target known, e.g. a project loaded in Mixed)
+    /// follow the highest fps present.
     public mutating func resumeConstant() {
-        if targetFollowsHighest { useConstant(nil) } else { useConstant(lastConstantTarget ?? Rational(1, 24)) }
+        if !targetFollowsHighest, let target = lastConstantTarget { useConstant(target) } else { useConstant(nil) }
     }
 
     // MARK: Undo / redo

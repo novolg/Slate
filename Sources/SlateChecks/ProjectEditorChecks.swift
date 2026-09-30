@@ -66,6 +66,13 @@ func runProjectEditorChecks() {
         expectEqual(e.project.fpsMode, FPSMode.constant(frameDuration: Rational(1, 24)))
     }
 
+    check("editor: a project loaded in Mixed with no known target follows the highest on Constant") {
+        var e = ProjectEditor(project: Project(fpsMode: .mixed), targetFollowsHighest: false)
+        e.addClips([clip48()])
+        e.resumeConstant()
+        expectEqual(e.project.fpsMode, FPSMode.constant(frameDuration: Rational(1, 48)))
+    }
+
     check("editor: a new clip starts with one auto segment; the first O replaces it, the next O adds") {
         var e = ProjectEditor()
         e.addClips([clip24()])
