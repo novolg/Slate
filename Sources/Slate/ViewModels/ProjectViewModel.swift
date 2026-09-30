@@ -265,7 +265,7 @@ final class ProjectViewModel {
         let wasUntitled = document.isUntitled
         do {
             let loaded = try await ProjectFile.load(from: url)
-            replaceProject(loaded, url: url, followsHighest: false, discardUntitledAutosave: wasUntitled)
+            replaceProject(loaded, url: url, followsHighest: false, discardUntitledAutosave: wasUntitled && restoreSettled)
         } catch {
             errorMessage = "Could not open \(url.lastPathComponent): \(error.localizedDescription)"
         }
@@ -274,7 +274,7 @@ final class ProjectViewModel {
     func newProject() {
         guard confirmDiscardChanges() else { return }
         autosaver?.cancel()
-        document.discardUntitledAutosave()
+        if restoreSettled { document.discardUntitledAutosave() }
         replaceProject(Project(), url: nil, followsHighest: true, discardUntitledAutosave: false)
     }
 
