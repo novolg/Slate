@@ -461,13 +461,26 @@ final class ProjectViewModel {
 
     // MARK: Segments (source time)
 
+    /// If the clip player is running, stop it on the frame it shows and refresh `clipTime` from it.
+    private func freezeClipTime() {
+        guard let p = clipPlayer, p.rate != 0 else { return }
+        p.pause()
+        let now = p.currentTime()
+        if now.isNumeric {
+            clipTime = clampClip(CMTimeConvertScale(now, timescale: sourceTimescale(of: editor.selectedClipID),
+                                                    method: .roundHalfAwayFromZero))
+        }
+    }
+
     func markIn() {
         ensureClipMode()
+        freezeClipTime()
         edit { $0.setInPoint(clipTime) }
     }
 
     func markOut() {
         ensureClipMode()
+        freezeClipTime()
         edit { _ = $0.commitOut(at: clipTime) }
     }
 
@@ -634,6 +647,8 @@ final class ProjectViewModel {
     func ensureClipMode() {
         guard mode == .project else { return }
         projectPlayer?.pause()
+        // The periodic observer can be 100 ms stale; ask the paused player for the exact frame.
+        if let now = projectPlayer?.currentTime(), now.isNumeric { projectTime = now }
         let location = projectTime.isNumeric
             ? timeMap.locate(quantized(projectTime, timescale: plan.outputTimescale)) : nil
         mode = .clip
