@@ -47,4 +47,13 @@ func runPlannerBlockerChecks() {
             expect(plan.plan(for: ref.id)?.action != ClipAction.blocked(.audioFormatMismatch))
         }
     }
+
+    check("planner: Mixed clips whose timescales cannot share one timeline are blocked") {
+        let odd = FrameTable.uniform(count: 50, frameDuration: Rational(1, 25), timescale: 2_147_483_629) // large prime
+        let a = TestData.clip(TestData.media(TestData.c24), keep: [(.zero, Rational(1))])
+        let b = TestData.clip(TestData.media(odd), keep: [(.zero, Rational(1))])
+        let plan = ExportPlanner.plan(Project(clips: [a, b], fpsMode: .mixed))
+        expect(plan.blockers.contains(.timescaleOverflow), "\(plan.blockers)")
+        expect(!plan.canExport)
+    }
 }

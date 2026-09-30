@@ -175,24 +175,15 @@ public enum ExportPlanner {
     /// Compute T_out: the lcm of d (in Constant mode) and every REQUIRED (copied) clip's timescale.
     /// Then optionally fold in each OPTIONAL timescale (re-encoded/skipped clips) one by one,
     /// keeping the fold only if the lcm exists and ≤ Int32.max; otherwise skip that timescale.
-    /// In Constant mode: overflow on required → return nil (blocker). In Mixed mode: overflow on
-    /// required → return largest required timescale (or 600 if none). Optional overflows never block.
+    /// In every mode an overflow on a required (copied) timescale returns nil (blocker); optional overflows never block.
     static func outputTimescale(mode: FPSMode, required: [Int32], optional: [Int32]) -> Int32? {
         var t: Int64 = 1
         if case .constant(let d) = mode { t = d.den }
 
-        // Required timescales: any overflow or overflow causes blocker
+        // Required (copied) timescales: no common multiple that fits Int32 → blocker, in every mode.
         for ts in required {
-            if let l = Rational.lcm(t, Int64(ts)) {
-                if l > Int64(Int32.max) {
-                    if case .mixed = mode { return required.max().map { Int32($0) } ?? 600 }
-                    return nil
-                }
-                t = l
-            } else {
-                if case .mixed = mode { return required.max().map { Int32($0) } ?? 600 }
-                return nil
-            }
+            guard let l = Rational.lcm(t, Int64(ts)), l <= Int64(Int32.max) else { return nil }
+            t = l
         }
 
         // Optional timescales: silently skip if overflow

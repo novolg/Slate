@@ -21,12 +21,14 @@ public enum CompositionError: Error, LocalizedError {
     case cannotAddTrack
     case noVideoTrack
     case missingAsset(UUID)
+    case offGrid(Rational)
 
     public var errorDescription: String? {
         switch self {
         case .cannotAddTrack: return "Could not create a composition track."
         case .noVideoTrack: return "A clip has no video track."
         case .missingAsset(let id): return "No asset for clip \(id)."
+        case .offGrid(let t): return "A clip cannot be placed exactly at \(t) s on the output timeline."
         }
     }
 }
@@ -64,7 +66,9 @@ public enum CompositionBuilder {
                 throw CompositionError.noVideoTrack
             }
             let range = CMTimeRange(start: ins.sourceStart.cmTime, duration: ins.duration.cmTime)
-            let at = ins.outputStart.cmTime(timescale: timescale) ?? ins.outputStart.cmTime
+            guard let at = ins.outputStart.cmTime(timescale: timescale) else {
+                throw CompositionError.offGrid(ins.outputStart)
+            }
             try video.insertTimeRange(range, of: srcVideo, at: at)
 
             if let audio, let srcAudio = try await ins.asset.loadTracks(withMediaType: .audio).first {

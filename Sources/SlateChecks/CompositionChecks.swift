@@ -47,4 +47,15 @@ func runCompositionChecks() async {
         let starts = track.segments.filter { !$0.isEmpty }.map { Rational($0.timeMapping.target.start) }
         expectEqual(starts, plan.grid.map(\.outputStart))
     }
+
+    await checkAsync("composition: an insert that is not a whole number of ticks throws instead of rounding") {
+        let asset = AVURLAsset(url: try fixture("c24.mp4"))
+        let ins = CompositionInsert(asset: asset, sourceStart: .zero, duration: Rational(1), outputStart: Rational(1, 7))
+        do {
+            _ = try await CompositionBuilder.build(inserts: [ins], includeAudio: false, timescale: 600)
+            expect(false, "expected offGrid")
+        } catch CompositionError.offGrid(let at) {
+            expectEqual(at, Rational(1, 7))
+        }
+    }
 }
