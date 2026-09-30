@@ -378,6 +378,8 @@ final class AudioSampleSource {
     private var coverage: AudioCoverage?
     /// A silence buffer queued by a previous call, appended before anything else.
     private var pendingSilence: (outStart: Int64, count: Int64)?
+    /// Format of the most recent decoded buffer; silence reuses it so the layout matches.
+    private var readerFormat: CMFormatDescription?
     /// A decoded buffer already matched against `coverage`, held back because its gap
     /// (if any) must be appended first; delivered on the following call.
     private var pendingKept: (buffer: CMSampleBuffer, first: Int64, lo: Int64, hi: Int64)?
@@ -438,6 +440,7 @@ final class AudioSampleSource {
                 continue
             }
             let pts = CMSampleBufferGetPresentationTimeStamp(buffer)
+            if let f = CMSampleBufferGetFormatDescription(buffer) { readerFormat = f }
             let n = Int64(CMSampleBufferGetNumSamples(buffer))
             guard pts.isNumeric, n > 0 else { continue }
             let first = (Rational(pts) * Rational(rate)).rounded()
@@ -498,21 +501,32 @@ final class AudioSampleSource {
         let bytesPerFrame = Int(channels) * MemoryLayout<Float32>.size
         let totalBytes = Int(count) * bytesPerFrame
 
-        var asbd = AudioStreamBasicDescription(
-            mSampleRate: format.sampleRate,
-            mFormatID: kAudioFormatLinearPCM,
-            mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
-            mBytesPerPacket: UInt32(bytesPerFrame),
-            mFramesPerPacket: 1,
-            mBytesPerFrame: UInt32(bytesPerFrame),
-            mChannelsPerFrame: channels,
-            mBitsPerChannel: 32,
-            mReserved: 0)
-        var formatDescription: CMFormatDescription?
-        let fdStatus = CMAudioFormatDescriptionCreate(
-            allocator: kCFAllocatorDefault, asbd: &asbd, layoutSize: 0, layout: nil,
-            magicCookieSize: 0, magicCookie: nil, extensions: nil, formatDescriptionOut: &formatDescription)
-        guard fdStatus == noErr, let formatDescription else { throw ReencodeError.audioFailed(fdStatus) }
+        let formatDescription: CMFormatDescription
+        if let readerFormat {
+            formatDescription = readerFormat
+        } else {
+            var asbd = AudioStreamBasicDescription(
+                mSampleRate: format.sampleRate,
+                mFormatID: kAudioFormatLinearPCM,
+                mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
+                mBytesPerPacket: UInt32(bytesPerFrame),
+                mFramesPerPacket: 1,
+                mBytesPerFrame: UInt32(bytesPerFrame),
+                mChannelsPerFrame: channels,
+                mBitsPerChannel: 32,
+                mReserved: 0)
+            var layout = AudioChannelLayout()
+            layout.mChannelLayoutTag = channels == 1 ? kAudioChannelLayoutTag_Mono
+                : channels == 2 ? kAudioChannelLayoutTag_Stereo
+                : kAudioChannelLayoutTag_DiscreteInOrder | channels
+            var made: CMFormatDescription?
+            let fdStatus = CMAudioFormatDescriptionCreate(
+                allocator: kCFAllocatorDefault, asbd: &asbd,
+                layoutSize: MemoryLayout<AudioChannelLayout>.size, layout: &layout,
+                magicCookieSize: 0, magicCookie: nil, extensions: nil, formatDescriptionOut: &made)
+            guard fdStatus == noErr, let made else { throw ReencodeError.audioFailed(fdStatus) }
+            formatDescription = made
+        }
 
         var blockBuffer: CMBlockBuffer?
         let bbStatus = CMBlockBufferCreateWithMemoryBlock(

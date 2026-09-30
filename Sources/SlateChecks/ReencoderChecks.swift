@@ -264,6 +264,24 @@ func runReencoderChecks() async {
         expectEqual(seen.of, 2)
         expect(seen.indices.contains(1) && seen.indices.contains(2), "saw \(seen.indices)")
     }
+
+    await checkAsync("reencoder: stereo short audio is padded and the export still ends with the video") {
+        let a = try await loadClip("c24_st_short_a.mp4", keep: [(0, 5.0)])
+        let b = try await loadClip("c24_st_short_a.mp4", keep: [(0, 5.0)])
+        expectEqual(a.media?.audio?.channels, 2)
+        let project = Project(clips: [a, b])
+        let plan = ExportPlanner.plan(project)
+        expect(plan.canExport, "\(plan.blockers)")
+        let out = try checksOutputDirectory().appendingPathComponent("re-stereo-short-audio.mp4")
+        let report = try await ProjectExporter().export(project: project, outputURL: out,
+                                                        tempDirectory: try checksOutputDirectory(), progress: { _ in })
+        expect(report.ok, "\(report.issues)")
+        let rate = Int64((plan.audio?.sampleRate ?? 44100).rounded())
+        let (first, end) = try await preciseAudioRange(out)
+        expect(first.magnitude <= Rational(1024, rate), "first audio sample at \(first.seconds) s")
+        expect((end - plan.totalDuration).magnitude <= Rational(1, rate),
+               "audio ends at \(end.seconds) s, video at \(plan.totalDuration.seconds) s")
+    }
 }
 
 final class SeenClips: @unchecked Sendable {
