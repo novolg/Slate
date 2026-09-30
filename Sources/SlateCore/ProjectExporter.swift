@@ -86,7 +86,7 @@ public final class ProjectExporter: @unchecked Sendable {
             if isCancelled { throw ProjectExportError.cancelled }
             guard report.ok else {
                 // Never replace the destination with a file that failed validation.
-                if let keepInvalidAt { try Self.install(staged, at: keepInvalidAt) }
+                if let keepInvalidAt { try? Self.install(staged, at: keepInvalidAt) }
                 throw ProjectExportError.validationFailed(report)
             }
             try Self.install(staged, at: outputURL)
@@ -120,8 +120,8 @@ public final class ProjectExporter: @unchecked Sendable {
         let fm = FileManager.default
         let sibling = destination.deletingLastPathComponent()
             .appendingPathComponent(".slate-\(UUID().uuidString).mp4")
-        try fm.moveItem(at: staged, to: sibling)
         do {
+            try fm.moveItem(at: staged, to: sibling)
             if fm.fileExists(atPath: destination.path) {
                 _ = try fm.replaceItemAt(destination, withItemAt: sibling)
             } else {
