@@ -87,6 +87,29 @@ func runProjectFileChecks() async {
         expect(f.clips.allSatisfy { $0.relativePath == nil })
     }
 
+    check("project file: hostile numbers, bad ranges, bad fps mode and version 0 throw notAProject instead of crashing") {
+        func expectRefused(_ label: String, _ mutate: (inout ProjectFile) -> Void) throws {
+            var f = try ProjectFile(project: sampleProject(), savedAt: file)
+            mutate(&f)
+            let data = try f.encoded()
+            do {
+                _ = try ProjectFile.decode(data)
+                expect(false, "\(label): expected notAProject")
+            } catch ProjectFileError.notAProject {
+                // expected
+            }
+        }
+        try expectRefused("den 0") { $0.clips[0].segments[0].start.den = 0 }
+        try expectRefused("den 2^40") { $0.clips[0].segments[0].end.den = 1_099_511_627_776 }
+        try expectRefused("num Int64.min") { $0.clips[0].segments[0].start.num = Int64.min }
+        try expectRefused("start > end") { $0.clips[0].segments[0].start.num = 100_000 }
+        try expectRefused("unknown kind") { $0.fpsMode.kind = "variable" }
+        try expectRefused("constant without duration") { $0.fpsMode.frameDuration = nil }
+        try expectRefused("constant den 0") { $0.fpsMode.frameDuration?.den = 0 }
+        try expectRefused("version 0") { $0.version = 0 }
+        try expectRefused("version -3") { $0.version = -3 }
+    }
+
     await checkAsync("project file: load probes files that exist and leaves missing ones without media") {
         let dir = try checksOutputDirectory().appendingPathComponent("pf-load", isDirectory: true)
         try? FileManager.default.removeItem(at: dir)

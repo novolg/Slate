@@ -97,11 +97,39 @@ public struct ProjectFile: Codable, Equatable {
         guard let v = try? JSONDecoder().decode(VersionOnly.self, from: data) else {
             throw ProjectFileError.notAProject
         }
+        guard v.version >= 1 else { throw ProjectFileError.notAProject }
         guard v.version <= currentVersion else { throw ProjectFileError.unsupportedVersion(v.version) }
+        let file: ProjectFile
         do {
-            return try JSONDecoder().decode(ProjectFile.self, from: data)
+            file = try JSONDecoder().decode(ProjectFile.self, from: data)
         } catch {
             throw ProjectFileError.notAProject
+        }
+        try file.validate()
+        return file
+    }
+
+    /// Reject values that would trap later in `Rational` / `CMTime` construction.
+    private func validate() throws {
+        func sane(_ r: RationalRecord) -> Bool {
+            r.den > 0 && r.den <= Int64(Int32.max) && r.num != Int64.min
+        }
+        switch fpsMode.kind {
+        case "mixed":
+            break
+        case "constant":
+            guard let d = fpsMode.frameDuration, sane(d), d.num > 0 else { throw ProjectFileError.notAProject }
+        default:
+            throw ProjectFileError.notAProject
+        }
+        for clip in clips {
+            for s in clip.segments {
+                guard sane(s.start), sane(s.end) else { throw ProjectFileError.notAProject }
+                // start > end via full-width cross products (cannot overflow).
+                let l = s.start.num.multipliedFullWidth(by: s.end.den)
+                let r = s.end.num.multipliedFullWidth(by: s.start.den)
+                if l.high > r.high || (l.high == r.high && l.low > r.low) { throw ProjectFileError.notAProject }
+            }
         }
     }
 
