@@ -10,7 +10,9 @@ public enum BlockReason: Equatable {
     case missingFile
     case frameSizeMismatch
     case codecMismatch
+    case unsupportedCodec
     case audioMismatch
+    case audioFormatMismatch
 }
 
 public enum ClipAction: Equatable {
@@ -71,21 +73,35 @@ public struct ExportPlan: Equatable {
 }
 
 public enum ExportPlanner {
+    /// Codecs Slate can copy and re-encode into an `.mp4`. Anything else (e.g. ProRes) is blocked
+    /// in every mode, because `VideoEncodeSettings.matching` would turn it into H.264.
+    public static let supportedCodecs: Set<FourCharCode> = [fourCC("avc1"), fourCC("hvc1"), fourCC("hev1")]
+
     public static func plan(_ project: Project) -> ExportPlan {
-        let reference = project.clips.first { $0.media != nil }?.media
+        // The first readable clip with a supported codec is the reference for all others.
+        let reference = project.clips.first {
+            $0.media.map { supportedCodecs.contains($0.codec) } ?? false
+        }?.media
 
         var blocked: [UUID: BlockReason] = [:]
         for clip in project.clips {
-            guard let m = clip.media, let ref = reference else {
+            guard let m = clip.media else {
                 blocked[clip.id] = .missingFile
                 continue
             }
+            guard supportedCodecs.contains(m.codec) else {
+                blocked[clip.id] = .unsupportedCodec
+                continue
+            }
+            guard let ref = reference else { continue } // unreachable: m itself is a candidate
             if m.width != ref.width || m.height != ref.height {
                 blocked[clip.id] = .frameSizeMismatch
             } else if m.codec != ref.codec {
                 blocked[clip.id] = .codecMismatch
             } else if m.hasAudio != ref.hasAudio {
                 blocked[clip.id] = .audioMismatch
+            } else if m.audio != ref.audio {
+                blocked[clip.id] = .audioFormatMismatch
             }
         }
 
