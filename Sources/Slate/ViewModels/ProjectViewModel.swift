@@ -193,6 +193,7 @@ final class ProjectViewModel {
             lastRevision = editor.revision
             plan = editor.plan
             projectStale = true
+            previewNote = nil
             documentVersion += 1
             autosaver?.noteChange()
             if mode == .project {
