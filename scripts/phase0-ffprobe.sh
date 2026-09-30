@@ -13,4 +13,17 @@ for f in "$ROOT"/build/phase0/*.mp4; do
     echo "   stream start / edit-list info:"
     ffprobe -v error -show_entries stream=index,codec_type,start_time,duration -of compact=p=0 "$f" \
         | sed 's/^/     /'
+    # Per-frame video pts in presentation order, as ffmpeg decodes them. B-frames with
+    # composition offsets (reordered output) show up here as a backward pts step.
+    ffprobe -v error -select_streams v:0 -show_entries frame=pts -of csv=p=0 "$f" \
+        | awk -F',' '
+            NR == 1 { prev = $1; next }
+            {
+                if (!bad && ($1 + 0 < prev + 0)) { bad = 1; badn = NR; badprev = prev; badcur = $1 }
+                prev = $1
+            }
+            END {
+                if (bad) printf "   pts monotonic: NO (first backward step at frame %d: %s -> %s)\n", badn, badprev, badcur
+                else print "   pts monotonic: yes"
+            }'
 done

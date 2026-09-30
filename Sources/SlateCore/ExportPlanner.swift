@@ -34,6 +34,10 @@ public enum PlanBlocker: Equatable {
     case noClips
     case noFrames
     case clip(UUID, BlockReason)
+    /// Two or more `Clip`s in the project share this id. Blocked here so nothing
+    /// downstream (e.g. `Dictionary(uniqueKeysWithValues:)` in `ProjectExporter`) has
+    /// to cope with — or trap on — duplicate clip ids.
+    case duplicateClipID(UUID)
     case timescaleOverflow
 }
 
@@ -111,6 +115,16 @@ public enum ExportPlanner {
         if project.clips.isEmpty { blockers.append(.noClips) }
         for clip in project.clips {
             if let reason = blocked[clip.id] { blockers.append(.clip(clip.id, reason)) }
+        }
+        // Block duplicate clip ids here (once per id, in first-seen order) rather than
+        // let a keyed-by-id lookup downstream trap on them.
+        var idCounts: [UUID: Int] = [:]
+        for clip in project.clips { idCounts[clip.id, default: 0] += 1 }
+        var reportedDuplicates = Set<UUID>()
+        for clip in project.clips where idCounts[clip.id]! > 1 {
+            if reportedDuplicates.insert(clip.id).inserted {
+                blockers.append(.duplicateClipID(clip.id))
+            }
         }
         if !project.clips.isEmpty && grid.totalFrames == 0 { blockers.append(.noFrames) }
 

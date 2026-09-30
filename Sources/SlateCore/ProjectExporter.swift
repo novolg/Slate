@@ -28,6 +28,13 @@ public enum ProjectExportError: Error, LocalizedError {
     }
 }
 
+/// Exports one project to one output file.
+///
+/// An instance is single-use. Once it is cancelled — via `cancel()`, or because the
+/// enclosing Swift `Task` running `export(...)` was cancelled — it stays cancelled
+/// forever: a later `export(...)` call on the same instance throws
+/// `ProjectExportError.cancelled` immediately, without touching disk. There is no API
+/// to reset it; create a fresh `ProjectExporter` for the next export.
 public final class ProjectExporter: @unchecked Sendable {
     private let lock = NSLock()
     private var cancelled = false
@@ -60,41 +67,47 @@ public final class ProjectExporter: @unchecked Sendable {
 
     public func export(project: Project, outputURL: URL, tempDirectory: URL,
                        progress: @escaping @Sendable (ExportStage) -> Void) async throws -> CadenceReport {
-        let plan = ExportPlanner.plan(project)
-        guard plan.canExport else { throw ProjectExportError.blocked(plan.blockers) }
-        let sources = project.clips.map(\.url)
-        if Self.outputCollides(outputURL, with: sources) {
-            throw ProjectExportError.outputIsSource
-        }
-        // The diagnostic path must not alias a source or the real destination either.
-        if let keepInvalidAt, Self.outputCollides(keepInvalidAt, with: sources + [outputURL]) {
-            throw ProjectExportError.outputIsSource
-        }
-
-        let work = tempDirectory.appendingPathComponent("slate-export-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: work) }
-
-        // Render and validate a staged file. The destination is touched only after
-        // success, so a failed or cancelled export keeps any existing file there.
-        let staged = work.appendingPathComponent("render.mp4")
-        do {
-            try await render(plan: plan, project: project, output: staged, work: work, progress: progress)
-            if isCancelled { throw ProjectExportError.cancelled }
-            progress(.validating)
-            let report = try await validator(staged, plan)
-            if isCancelled { throw ProjectExportError.cancelled }
-            guard report.ok else {
-                // Never replace the destination with a file that failed validation.
-                if let keepInvalidAt { try? Self.install(staged, at: keepInvalidAt) }
-                throw ProjectExportError.validationFailed(report)
+        // Bridges cooperative cancellation of the enclosing Task onto this instance:
+        // cancelling the Task running this call behaves exactly like calling `cancel()`.
+        try await withTaskCancellationHandler {
+            let plan = ExportPlanner.plan(project)
+            guard plan.canExport else { throw ProjectExportError.blocked(plan.blockers) }
+            let sources = project.clips.map(\.url)
+            if Self.outputCollides(outputURL, with: sources) {
+                throw ProjectExportError.outputIsSource
             }
-            try Self.install(staged, at: outputURL)
-            return report
-        } catch {
-            if isCancelled || error is CancellationError { throw ProjectExportError.cancelled }
-            if case ReencodeError.cancelled = error { throw ProjectExportError.cancelled }
-            throw error
+            // The diagnostic path must not alias a source or the real destination either.
+            if let keepInvalidAt, Self.outputCollides(keepInvalidAt, with: sources + [outputURL]) {
+                throw ProjectExportError.outputIsSource
+            }
+
+            let work = tempDirectory.appendingPathComponent("slate-export-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: work) }
+
+            // Render and validate a staged file. The destination is touched only after
+            // success, so a failed or cancelled export keeps any existing file there.
+            let staged = work.appendingPathComponent("render.mp4")
+            do {
+                try await render(plan: plan, project: project, output: staged, work: work, progress: progress)
+                if isCancelled { throw ProjectExportError.cancelled }
+                progress(.validating)
+                let report = try await validator(staged, plan)
+                if isCancelled { throw ProjectExportError.cancelled }
+                guard report.ok else {
+                    // Never replace the destination with a file that failed validation.
+                    if let keepInvalidAt { try? Self.install(staged, at: keepInvalidAt) }
+                    throw ProjectExportError.validationFailed(report)
+                }
+                try Self.install(staged, at: outputURL)
+                return report
+            } catch {
+                if isCancelled || error is CancellationError { throw ProjectExportError.cancelled }
+                if case ReencodeError.cancelled = error { throw ProjectExportError.cancelled }
+                throw error
+            }
+        } onCancel: {
+            self.cancel()
         }
     }
 

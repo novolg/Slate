@@ -41,6 +41,7 @@ enum Phase0 {
         let d48 = FPSMode.constant(frameDuration: Rational(1, 48))
         let cases = [
             Case(file: "phase0-mixed.mp4", mode: .mixed, strategy: .selective, audio: false),
+            Case(file: "phase0-mixed-audio.mp4", mode: .mixed, strategy: .selective, audio: true),
             Case(file: "phase0-selective-24.mp4", mode: d24, strategy: .selective, audio: false),
             Case(file: "phase0-all-24.mp4", mode: d24, strategy: .reencodeAll, audio: false),
             Case(file: "phase0-selective-48.mp4", mode: d48, strategy: .selective, audio: false),

@@ -86,6 +86,14 @@ func runPlannerChecks() {
         expect(ExportPlanner.plan(Project()).blockers.contains(.noClips))
     }
 
+    check("planner: duplicate clip ids block export") {
+        let a = TestData.clip(TestData.media(TestData.c24), keep: whole)
+        let dup = Clip(id: a.id, url: a.url, segments: a.segments, media: a.media)
+        let plan = ExportPlanner.plan(Project(clips: [a, dup]))
+        expect(!plan.canExport)
+        expect(plan.blockers.contains(.duplicateClipID(a.id)))
+    }
+
     check("planner: a re-encoded clip with an odd timescale never blocks export") {
         let odd = FrameTable.uniform(count: 50, frameDuration: Rational(1, 25), timescale: 2_147_483_629) // large prime
         let a = TestData.clip(TestData.media(TestData.c24), keep: [(.zero, Rational(1))])
