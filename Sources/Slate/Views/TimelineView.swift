@@ -4,8 +4,9 @@ import AppKit
 import CoreMedia
 import SlateCore
 
+@MainActor
 struct TimelineView: View {
-    let vm: EditorViewModel
+    let vm: ProjectViewModel
 
     private let stripHeight: CGFloat = 56
     private let rulerHeight: CGFloat = 18
@@ -24,11 +25,14 @@ struct TimelineView: View {
     @State private var lastMagnification: Double = 1.0
     @State private var hoverNearEdge: Bool = false
 
+    /// Ticks per second used for times created from mouse positions (the clip's own track timescale).
+    private var sourceTimescale: Int32 { vm.selectedClip?.media?.frames.timescale ?? 600 }
+
     var body: some View {
         GeometryReader { geo in
             let baseWidth = geo.size.width
             let contentWidth = max(baseWidth * CGFloat(vm.zoom), baseWidth)
-            let total = max(vm.duration.seconds, 0.0001)
+            let total = max(vm.clipDuration.seconds, 0.0001)
 
             ScrollView(.horizontal, showsIndicators: false) {
                 ZStack(alignment: .topLeading) {
@@ -55,8 +59,16 @@ struct TimelineView: View {
                     playhead(width: contentWidth, total: total)
                         .frame(width: contentWidth, height: totalHeight)
 
-                    // Topmost layer: NSView-based mouse capture. Owns ALL mouse handling
-                    // for the timeline (drag classification, seek, edge resize, hover cursor).
+                    if vm.selectedClip?.media == nil {
+                        Text("File is missing — right-click the card and choose “Locate file…”")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .padding(.leading, 12)
+                            .padding(.top, rulerHeight + 20)
+                            .allowsHitTesting(false)
+                    }
+
+                    // Topmost layer: AppKit mouse capture owns ALL mouse handling for the timeline.
                     TimelineMouseCapture(
                         onMouseDown: { p in handleMouseDown(p, contentWidth: contentWidth, total: total) },
                         onMouseDragged: { p in handleMouseDragged(p, contentWidth: contentWidth, total: total) },
@@ -66,15 +78,15 @@ struct TimelineView: View {
                     )
                     .frame(width: contentWidth, height: totalHeight)
                 }
-                // Pinch zoom (trackpad) — magnify gesture is fine here, no conflict with mouse.
                 .gesture(magnifyGesture)
             }
         }
         .frame(height: totalHeight)
         .background(Color(white: 0.06))
+        .opacity(vm.mode == .project ? 0.55 : 1)
     }
 
-    // MARK: Mouse handlers (replaces SwiftUI DragGesture)
+    // MARK: Mouse handlers
 
     private func handleMouseDown(_ p: CGPoint, contentWidth: CGFloat, total: Double) {
         let kind = classify(at: p, contentWidth: contentWidth, total: total)
@@ -83,15 +95,16 @@ struct TimelineView: View {
         case .none:
             break
         case .seek:
-            // Click on segment body → select; click in empty area → seek.
+            // Click on a segment body selects it; a click in an empty area seeks.
             if let s = hitSegment(atX: p.x, contentWidth: contentWidth, total: total) {
                 vm.selectedSegmentID = s.id
             } else {
                 vm.selectedSegmentID = nil
-                vm.seek(to: time(forX: p.x, contentWidth: contentWidth, total: total))
+                vm.timelineSeek(to: time(forX: p.x, contentWidth: contentWidth, total: total))
             }
         case .edge(let id, _):
             vm.selectedSegmentID = id
+            vm.beginSegmentDrag()
         }
     }
 
@@ -101,20 +114,17 @@ struct TimelineView: View {
         case .none:
             break
         case .seek:
-            // Only continue seeking if start was in empty area (we set selectedSegmentID
-            // to nil in that case, so use that as the marker).
-            if vm.selectedSegmentID == nil {
-                vm.seek(to: t)
-            }
+            // Keep seeking only if the press started in an empty area (no segment selected then).
+            if vm.selectedSegmentID == nil { vm.timelineSeek(to: t) }
         case .edge(let id, let edge):
-            vm.updateSegmentEdge(id: id, edge: edge, to: t, snap: .none, commit: false)
+            vm.dragEdge(id: id, edge: edge, to: t)
         }
     }
 
     private func handleMouseUp(_ p: CGPoint, contentWidth: CGFloat, total: Double) {
         if case .edge(let id, let edge) = dragKind {
-            let t = time(forX: p.x, contentWidth: contentWidth, total: total)
-            vm.updateSegmentEdge(id: id, edge: edge, to: t, snap: .none, commit: true)
+            vm.dragEdge(id: id, edge: edge, to: time(forX: p.x, contentWidth: contentWidth, total: total))
+            vm.endSegmentDrag()
         }
         dragKind = .none
     }
@@ -135,7 +145,7 @@ struct TimelineView: View {
 
     @ViewBuilder
     private func thumbnailsLayer(width: CGFloat) -> some View {
-        let thumbs = vm.thumbnails
+        let thumbs = vm.selectedVisuals.thumbnails
         if thumbs.isEmpty {
             Rectangle().fill(Color(white: 0.18))
         } else {
@@ -152,7 +162,7 @@ struct TimelineView: View {
     private func keyframeTicks(width: CGFloat, total: Double) -> some View {
         Canvas { ctx, size in
             let tickColor = GraphicsContext.Shading.color(.white.opacity(0.55))
-            for t in vm.keyframes.times {
+            for t in vm.selectedVisuals.keyframes.times {
                 let x = CGFloat(t.seconds / total) * size.width
                 let rect = CGRect(x: x, y: 4, width: 1, height: size.height - 6)
                 ctx.fill(Path(rect), with: tickColor)
@@ -167,9 +177,17 @@ struct TimelineView: View {
                 let w = max(CGFloat(seg.duration.seconds / total) * size.width, 2)
                 let rect = CGRect(x: x, y: 0, width: w, height: size.height)
                 let isSelected = vm.selectedSegmentID == seg.id
-                ctx.fill(Path(rect), with: .color(.yellow.opacity(isSelected ? 0.32 : 0.20)))
-                ctx.stroke(Path(rect), with: .color(.yellow.opacity(isSelected ? 1.0 : 0.7)),
-                           lineWidth: isSelected ? 2 : 1)
+                if seg.isAuto {
+                    ctx.fill(Path(rect), with: .color(.white.opacity(0.08)))
+                    ctx.stroke(Path(rect), with: .color(.white.opacity(isSelected ? 0.9 : 0.45)),
+                               style: StrokeStyle(lineWidth: isSelected ? 2 : 1, dash: [4, 3]))
+                    ctx.draw(Text("whole clip").font(.system(size: 10, weight: .medium)).foregroundColor(.white.opacity(0.8)),
+                             at: CGPoint(x: rect.minX + 12, y: rect.midY), anchor: .leading)
+                } else {
+                    ctx.fill(Path(rect), with: .color(.yellow.opacity(isSelected ? 0.32 : 0.20)))
+                    ctx.stroke(Path(rect), with: .color(.yellow.opacity(isSelected ? 1.0 : 0.7)),
+                               lineWidth: isSelected ? 2 : 1)
+                }
             }
         }
     }
@@ -180,7 +198,8 @@ struct TimelineView: View {
                 let leftX = CGFloat(seg.start.seconds / total) * size.width
                 let rightX = CGFloat(seg.end.seconds / total) * size.width
                 let isSelected = vm.selectedSegmentID == seg.id
-                let color = GraphicsContext.Shading.color(.yellow.opacity(isSelected ? 1.0 : 0.85))
+                let base: Color = seg.isAuto ? .white : .yellow
+                let color = GraphicsContext.Shading.color(base.opacity(isSelected ? 1.0 : (seg.isAuto ? 0.6 : 0.85)))
                 let leftBar = CGRect(x: leftX - handleVisibleWidth / 2, y: rulerHeight,
                                      width: handleVisibleWidth, height: stripHeight)
                 let rightBar = CGRect(x: rightX - handleVisibleWidth / 2, y: rulerHeight,
@@ -194,27 +213,21 @@ struct TimelineView: View {
     // MARK: Hit-classification helpers
 
     private func classify(at point: CGPoint, contentWidth: CGFloat, total: Double) -> DragKind {
-        // Edge takes priority — search all segments for an edge within hit radius.
+        // Edge takes priority: the nearest edge within the hit radius wins.
         var bestEdge: (UUID, SegmentEdge, CGFloat)? = nil
         for seg in vm.segments {
             let leftX = CGFloat(seg.start.seconds / total) * contentWidth
             let rightX = CGFloat(seg.end.seconds / total) * contentWidth
             let dl = abs(point.x - leftX)
             let dr = abs(point.x - rightX)
-            if dl <= handleHitRadius {
-                if bestEdge == nil || dl < bestEdge!.2 {
-                    bestEdge = (seg.id, .start, dl)
-                }
+            if dl <= handleHitRadius, bestEdge == nil || dl < bestEdge!.2 {
+                bestEdge = (seg.id, .start, dl)
             }
-            if dr <= handleHitRadius {
-                if bestEdge == nil || dr < bestEdge!.2 {
-                    bestEdge = (seg.id, .end, dr)
-                }
+            if dr <= handleHitRadius, bestEdge == nil || dr < bestEdge!.2 {
+                bestEdge = (seg.id, .end, dr)
             }
         }
-        if let e = bestEdge {
-            return .edge(e.0, e.1)
-        }
+        if let e = bestEdge { return .edge(e.0, e.1) }
         return .seek
     }
 
@@ -239,7 +252,7 @@ struct TimelineView: View {
 
     private func time(forX x: CGFloat, contentWidth: CGFloat, total: Double) -> CMTime {
         let f = max(0, min(1, Double(x / max(contentWidth, 1))))
-        return CMTime(seconds: f * total, preferredTimescale: vm.duration.timescale)
+        return CMTime(seconds: f * total, preferredTimescale: sourceTimescale)
     }
 
     // MARK: Markers
@@ -256,7 +269,7 @@ struct TimelineView: View {
 
     private func playhead(width: CGFloat, total: Double) -> some View {
         Canvas { ctx, size in
-            let x = CGFloat(vm.currentTime.seconds / total) * size.width
+            let x = CGFloat(vm.timelinePlayhead.seconds / total) * size.width
             let line = CGRect(x: x - 0.75, y: 0, width: 1.5, height: size.height)
             ctx.fill(Path(line), with: .color(.white))
             var tri = Path()
