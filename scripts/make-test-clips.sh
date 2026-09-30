@@ -18,6 +18,15 @@ X264=(-c:v libx264 -pix_fmt yuv420p -crf 19)
 # 48 fps stand-in for RIFE: motion-interpolated from the 24 fps clip.
 "${FF[@]}" -i "$OUT/c24_a.mp4" -vf minterpolate=fps=48 "${X264[@]}" -c:a copy "$OUT/c48_a.mp4"
 
+# Short-audio regression fixture (fable-review.md I1): 5 s video, ~4.99 s audio, no
+# -shortest so the container keeps each stream's own natural length instead of trimming
+# the video to match. Kept at (0, 5.0) — the clip's full length — this exercises the
+# few-hundred-sample shortfall that Re-encode all must pad with silence rather than let
+# AVAssetWriter's AAC input collapse into a timestamp gap.
+"${FF[@]}" -f lavfi -i testsrc2=size=640x360:rate=24:duration=5 \
+    -f lavfi -i sine=frequency=440:sample_rate=44100:duration=4.99 \
+    "${X264[@]}" -c:a aac -b:a 128k "$OUT/c24_short_a.mp4"
+
 # Video-only versions.
 "${FF[@]}" -i "$OUT/c24_a.mp4" -an -c:v copy "$OUT/c24.mp4"
 "${FF[@]}" -i "$OUT/c48_a.mp4" -an -c:v copy "$OUT/c48.mp4"

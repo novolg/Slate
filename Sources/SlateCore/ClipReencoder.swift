@@ -295,28 +295,45 @@ public struct AudioCoverage {
 
     public var isComplete: Bool { cursor >= count }
 
-    /// A decoded buffer covers source samples [first, first + n). Returns the absolute
-    /// range to keep, or nil when nothing of it is wanted.
-    public mutating func accept(first: Int64, count n: Int64) throws -> (Int64, Int64)? {
+    /// Result of matching one decoded buffer against what is still wanted.
+    public struct Accepted {
+        /// Samples missing immediately before `range` (0 if none). Already folded into
+        /// `missing`; the caller must emit this many samples of silence before `range`.
+        public let gapBefore: Int64
+        /// Absolute [lo, hi) to keep from the decoded buffer, or nil when nothing in it
+        /// is wanted (it lies entirely before what's already been consumed).
+        public let range: (Int64, Int64)?
+    }
+
+    /// A decoded buffer covers source samples [first, first + n). Returns the gap (if
+    /// any) that precedes what's kept, and the absolute range to keep.
+    public mutating func accept(first: Int64, count n: Int64) throws -> Accepted {
         let wantFrom = start + cursor
         let lo = max(first, wantFrom)
         let hi = min(first + n, start + count)
-        guard hi > lo else { return nil }
+        guard hi > lo else { return Accepted(gapBefore: 0, range: nil) }
+        var gap: Int64 = 0
         if lo > wantFrom {
-            missing += lo - wantFrom
+            gap = lo - wantFrom
+            missing += gap
             try check()
         }
         cursor = hi - start
-        return (lo, hi)
+        return Accepted(gapBefore: gap, range: (lo, hi))
     }
 
-    /// The source ended. Whatever is still wanted is missing.
-    public mutating func finish() throws {
-        if cursor < count {
-            missing += count - cursor
+    /// The source ended. Whatever is still wanted is missing. Returns how many samples
+    /// became missing just now (0 if the piece was already fully covered), so the
+    /// caller can fill exactly that many with silence.
+    @discardableResult
+    public mutating func finish() throws -> Int64 {
+        let gap = max(count - cursor, 0)
+        if gap > 0 {
+            missing += gap
             cursor = count
         }
         try check()
+        return gap
     }
 
     private func check() throws {
@@ -326,6 +343,12 @@ public struct AudioCoverage {
 
 /// Streams decoded PCM for each grid segment, trimmed to exact sample ranges and
 /// retimed onto the output clock. The AAC encoder in AVAssetWriter adds priming.
+///
+/// Any gap `AudioCoverage` records (a short source, or a decoded buffer that starts
+/// late) is filled with zero-filled PCM at the correct output position before the
+/// kept audio around it is appended. AVAssetWriter's AAC input has no concept of a
+/// timestamp gap between two buffers it is handed — it just concatenates them — so
+/// leaving the gap unfilled would silently shift everything after it earlier.
 final class AudioSampleSource {
     private struct Piece {
         let job: Int
@@ -342,6 +365,11 @@ final class AudioSampleSource {
     private var reader: AVAssetReader?
     private var output: AVAssetReaderTrackOutput?
     private var coverage: AudioCoverage?
+    /// A silence buffer queued by a previous call, appended before anything else.
+    private var pendingSilence: (outStart: Int64, count: Int64)?
+    /// A decoded buffer already matched against `coverage`, held back because its gap
+    /// (if any) must be appended first; delivered on the following call.
+    private var pendingKept: (buffer: CMSampleBuffer, first: Int64, lo: Int64, hi: Int64)?
 
     init(jobs: [ReencodeJob], format: AudioFormat) {
         self.jobs = jobs
@@ -360,8 +388,19 @@ final class AudioSampleSource {
         }
     }
 
-    /// Appends one trimmed buffer. Returns false when all audio is written.
+    /// Appends one buffer (silence or kept audio). Returns false when all audio is written.
     func appendNext(to input: AVAssetWriterInput) throws -> Bool {
+        if let gap = pendingSilence {
+            pendingSilence = nil
+            try appendSilence(to: input, outStart: gap.outStart, count: gap.count)
+            return true
+        }
+        if let kept = pendingKept {
+            pendingKept = nil
+            try appendKept(to: input, piece: pieces[pieceIndex], buffer: kept.buffer,
+                           first: kept.first, lo: kept.lo, hi: kept.hi)
+            return true
+        }
         while pieceIndex < pieces.count {
             let piece = pieces[pieceIndex]
             if output == nil { try open(piece) }
@@ -371,9 +410,14 @@ final class AudioSampleSource {
             }
             guard let buffer = output?.copyNextSampleBuffer() else {
                 try throwIfReaderFailed(reader)
-                // Normal end of the source audio: the rest counts as missing.
-                try coverage!.finish()
+                // Normal end of the source audio: pad the remainder with silence.
+                let gapCount = try coverage!.finish()
+                let gapStart = piece.outStartSample + piece.count - gapCount
                 closePiece()
+                if gapCount > 0 {
+                    try appendSilence(to: input, outStart: gapStart, count: gapCount)
+                    return true
+                }
                 continue
             }
             let pts = CMSampleBufferGetPresentationTimeStamp(buffer)
@@ -381,33 +425,100 @@ final class AudioSampleSource {
             guard pts.isNumeric, n > 0 else { continue }
             let first = (Rational(pts) * Rational(rate)).rounded()
             if first >= piece.sourceStartSample + piece.count {
-                try coverage!.finish()
+                let gapCount = try coverage!.finish()
+                let gapStart = piece.outStartSample + piece.count - gapCount
                 closePiece()
+                if gapCount > 0 {
+                    try appendSilence(to: input, outStart: gapStart, count: gapCount)
+                    return true
+                }
                 continue
             }
             // Counts any gap before this buffer as missing; throws past one AAC packet.
-            guard let kept = try coverage!.accept(first: first, count: n) else { continue }
-            let (lo, hi) = kept
-            var sub: CMSampleBuffer?
-            let status = CMSampleBufferCopySampleBufferForRange(
-                allocator: nil, sampleBuffer: buffer,
-                sampleRange: CFRange(location: CFIndex(lo - first), length: CFIndex(hi - lo)),
-                sampleBufferOut: &sub)
-            guard status == noErr, let sub else { throw ReencodeError.audioFailed(status) }
-            var timing = CMSampleTimingInfo(
-                duration: CMTime(value: 1, timescale: Int32(rate)),
-                presentationTimeStamp: CMTime(value: piece.outStartSample + (lo - piece.sourceStartSample),
-                                              timescale: Int32(rate)),
-                decodeTimeStamp: .invalid)
-            var retimed: CMSampleBuffer?
-            let status2 = CMSampleBufferCreateCopyWithNewTiming(
-                allocator: nil, sampleBuffer: sub, sampleTimingEntryCount: 1,
-                sampleTimingArray: &timing, sampleBufferOut: &retimed)
-            guard status2 == noErr, let retimed else { throw ReencodeError.audioFailed(status2) }
-            guard input.append(retimed) else { throw ReencodeError.writerFailed("audio append failed") }
+            let accepted = try coverage!.accept(first: first, count: n)
+            guard let (lo, hi) = accepted.range else { continue }
+            if accepted.gapBefore > 0 {
+                // Emit the gap as silence now; deliver this same buffer's kept range
+                // on the next call so exactly one buffer is appended per call.
+                pendingKept = (buffer, first, lo, hi)
+                let gapStart = piece.outStartSample + (lo - accepted.gapBefore - piece.sourceStartSample)
+                try appendSilence(to: input, outStart: gapStart, count: accepted.gapBefore)
+                return true
+            }
+            try appendKept(to: input, piece: piece, buffer: buffer, first: first, lo: lo, hi: hi)
             return true
         }
         return false
+    }
+
+    private func appendKept(to input: AVAssetWriterInput, piece: Piece, buffer: CMSampleBuffer,
+                            first: Int64, lo: Int64, hi: Int64) throws {
+        var sub: CMSampleBuffer?
+        let status = CMSampleBufferCopySampleBufferForRange(
+            allocator: nil, sampleBuffer: buffer,
+            sampleRange: CFRange(location: CFIndex(lo - first), length: CFIndex(hi - lo)),
+            sampleBufferOut: &sub)
+        guard status == noErr, let sub else { throw ReencodeError.audioFailed(status) }
+        var timing = CMSampleTimingInfo(
+            duration: CMTime(value: 1, timescale: Int32(rate)),
+            presentationTimeStamp: CMTime(value: piece.outStartSample + (lo - piece.sourceStartSample),
+                                          timescale: Int32(rate)),
+            decodeTimeStamp: .invalid)
+        var retimed: CMSampleBuffer?
+        let status2 = CMSampleBufferCreateCopyWithNewTiming(
+            allocator: nil, sampleBuffer: sub, sampleTimingEntryCount: 1,
+            sampleTimingArray: &timing, sampleBufferOut: &retimed)
+        guard status2 == noErr, let retimed else { throw ReencodeError.audioFailed(status2) }
+        guard input.append(retimed) else { throw ReencodeError.writerFailed("audio append failed") }
+    }
+
+    /// Builds and appends `count` zero-filled PCM samples at output sample `outStart`,
+    /// in the same format (Float32 interleaved, this piece's rate and channel count) as
+    /// the decoded buffers, so the writer sees no timestamp gap.
+    private func appendSilence(to input: AVAssetWriterInput, outStart: Int64, count: Int64) throws {
+        precondition(count > 0)
+        let channels = UInt32(format.channels)
+        let bytesPerFrame = Int(channels) * MemoryLayout<Float32>.size
+        let totalBytes = Int(count) * bytesPerFrame
+
+        var asbd = AudioStreamBasicDescription(
+            mSampleRate: format.sampleRate,
+            mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
+            mBytesPerPacket: UInt32(bytesPerFrame),
+            mFramesPerPacket: 1,
+            mBytesPerFrame: UInt32(bytesPerFrame),
+            mChannelsPerFrame: channels,
+            mBitsPerChannel: 32,
+            mReserved: 0)
+        var formatDescription: CMFormatDescription?
+        let fdStatus = CMAudioFormatDescriptionCreate(
+            allocator: kCFAllocatorDefault, asbd: &asbd, layoutSize: 0, layout: nil,
+            magicCookieSize: 0, magicCookie: nil, extensions: nil, formatDescriptionOut: &formatDescription)
+        guard fdStatus == noErr, let formatDescription else { throw ReencodeError.audioFailed(fdStatus) }
+
+        var blockBuffer: CMBlockBuffer?
+        let bbStatus = CMBlockBufferCreateWithMemoryBlock(
+            allocator: kCFAllocatorDefault, memoryBlock: nil, blockLength: totalBytes,
+            blockAllocator: kCFAllocatorDefault, customBlockSource: nil, offsetToData: 0,
+            dataLength: totalBytes, flags: 0, blockBufferOut: &blockBuffer)
+        guard bbStatus == kCMBlockBufferNoErr, let blockBuffer else { throw ReencodeError.audioFailed(bbStatus) }
+        let fillStatus = CMBlockBufferFillDataBytes(with: 0, blockBuffer: blockBuffer,
+                                                    offsetIntoDestination: 0, dataLength: totalBytes)
+        guard fillStatus == kCMBlockBufferNoErr else { throw ReencodeError.audioFailed(fillStatus) }
+
+        var timing = CMSampleTimingInfo(
+            duration: CMTime(value: 1, timescale: Int32(rate)),
+            presentationTimeStamp: CMTime(value: outStart, timescale: Int32(rate)),
+            decodeTimeStamp: .invalid)
+        var sampleBuffer: CMSampleBuffer?
+        let sbStatus = CMSampleBufferCreate(
+            allocator: kCFAllocatorDefault, dataBuffer: blockBuffer, dataReady: true,
+            makeDataReadyCallback: nil, refcon: nil, formatDescription: formatDescription,
+            sampleCount: Int(count), sampleTimingEntryCount: 1, sampleTimingArray: &timing,
+            sampleSizeEntryCount: 1, sampleSizeArray: [bytesPerFrame], sampleBufferOut: &sampleBuffer)
+        guard sbStatus == noErr, let sampleBuffer else { throw ReencodeError.audioFailed(sbStatus) }
+        guard input.append(sampleBuffer) else { throw ReencodeError.writerFailed("silence append failed") }
     }
 
     private func open(_ piece: Piece) throws {
