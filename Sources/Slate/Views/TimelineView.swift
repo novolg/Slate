@@ -225,6 +225,7 @@ struct TimelineView: View {
     // MARK: Hit-classification helpers
 
     private func classify(at point: CGPoint, contentWidth: CGFloat, total: Double) -> DragKind {
+        if vm.selectedClip?.media == nil { return .none }
         // Edge takes priority: the nearest edge within the hit radius wins.
         var bestEdge: (UUID, SegmentEdge, CGFloat)? = nil
         for seg in vm.segments {
