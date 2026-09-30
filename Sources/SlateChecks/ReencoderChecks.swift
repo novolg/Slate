@@ -19,7 +19,7 @@ private func reencode(_ clip: Clip, to d: Rational, name: String) async throws -
 /// duration), both exact `Rational`. Used where `CadenceValidator.audioIssues`' one-AAC-
 /// packet tolerance (1024 samples) is too loose — the I1 regression check needs the
 /// output's audio end to match the video end within one sample.
-private func preciseAudioRange(_ url: URL) async throws -> (first: Rational, end: Rational) {
+func preciseAudioRange(_ url: URL) async throws -> (first: Rational, end: Rational) {
     let asset = AVURLAsset(url: url)
     guard let track = try await asset.loadTracks(withMediaType: .audio).first else {
         throw ReencodeError.cannotStartReader("no audio track")

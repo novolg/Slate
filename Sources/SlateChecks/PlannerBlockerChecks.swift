@@ -40,12 +40,23 @@ func runPlannerBlockerChecks() {
         let ref = TestData.clip(TestData.media(TestData.c24, audio: true), keep: whole)
         let st = TestData.clip(stereo, keep: whole)
         let hi = TestData.clip(rate48, keep: whole)
-        for mode in [FPSMode.mixed, .constant(frameDuration: Rational(1, 24))] {
-            let plan = ExportPlanner.plan(Project(clips: [ref, st, hi], fpsMode: mode))
-            expectEqual(plan.plan(for: st.id)?.action, ClipAction.blocked(.audioFormatMismatch), "\(mode)")
-            expectEqual(plan.plan(for: hi.id)?.action, ClipAction.blocked(.audioFormatMismatch), "\(mode)")
+        let const24 = FPSMode.constant(frameDuration: Rational(1, 24))
+        // Mixed and Constant + selective copy some clips: blocked.
+        var selective = Project(clips: [ref, st, hi], fpsMode: const24)
+        selective.constantStrategy = .selective
+        let blockedPlans = [ExportPlanner.plan(Project(clips: [ref, st, hi], fpsMode: .mixed)),
+                            ExportPlanner.plan(selective)]
+        for plan in blockedPlans {
+            expectEqual(plan.plan(for: st.id)?.action, ClipAction.blocked(.audioFormatMismatch), "\(plan.mode)")
+            expectEqual(plan.plan(for: hi.id)?.action, ClipAction.blocked(.audioFormatMismatch), "\(plan.mode)")
             expect(plan.plan(for: ref.id)?.action != ClipAction.blocked(.audioFormatMismatch))
+            expect(!plan.canExport)
         }
+        // Constant + Re-encode all (default) converts the audio: allowed.
+        let all = ExportPlanner.plan(Project(clips: [ref, st, hi], fpsMode: const24))
+        expect(all.canExport, "\(all.blockers)")
+        expectEqual(all.plan(for: st.id)?.action, ClipAction.reencode(.reencodeAll))
+        expectEqual(all.plan(for: hi.id)?.action, ClipAction.reencode(.reencodeAll))
     }
 
     check("planner: Mixed clips whose timescales cannot share one timeline are blocked") {

@@ -259,6 +259,19 @@ func runExporterChecks() async {
         }
         expect(!FileManager.default.fileExists(atPath: out.path), "a cancelled instance must not write a file")
     }
+
+    await checkAsync("exporter: re-encode all mixes 44.1 kHz and 48 kHz audio") {
+        let a = try await loadClip("c24_a.mp4", keep: [(0.5, 2.0)])
+        let b = try await loadClip("c24_48k_a.mp4", keep: [(0.5, 2.0)])
+        let (report, plan) = try await exportProject(Project(clips: [a, b]), name: "ex-mixed-rates-all.mp4")
+        expect(plan.canExport, "\(plan.blockers)")
+        expect(report.ok, "\(report.issues)")
+        let out = try checksOutputDirectory().appendingPathComponent("ex-mixed-rates-all.mp4")
+        let rate = Int64((plan.audio?.sampleRate ?? 44100).rounded())
+        let (_, end) = try await preciseAudioRange(out)
+        expect((end - plan.totalDuration).magnitude <= Rational(1, rate),
+               "audio ends at \(end.seconds) s, video at \(plan.totalDuration.seconds) s")
+    }
 }
 
 /// Thread-safe holder so an unstructured Task's own operation closure can cancel it

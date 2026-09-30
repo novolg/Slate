@@ -85,6 +85,11 @@ public enum ExportPlanner {
             $0.media.map { supportedCodecs.contains($0.codec) } ?? false
         }?.media
 
+        // Constant + Re-encode all converts every clip's audio to the reference rate/channels
+        // in ClipReencoder, so an audio format difference only blocks paths that copy.
+        var reencodesEverything = false
+        if case .constant = project.fpsMode, project.constantStrategy == .reencodeAll { reencodesEverything = true }
+
         var blocked: [UUID: BlockReason] = [:]
         for clip in project.clips {
             guard let m = clip.media else {
@@ -102,7 +107,7 @@ public enum ExportPlanner {
                 blocked[clip.id] = .codecMismatch
             } else if m.hasAudio != ref.hasAudio {
                 blocked[clip.id] = .audioMismatch
-            } else if m.audio != ref.audio {
+            } else if m.audio != ref.audio && !reencodesEverything {
                 blocked[clip.id] = .audioFormatMismatch
             }
         }
