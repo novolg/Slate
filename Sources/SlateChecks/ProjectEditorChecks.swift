@@ -187,4 +187,37 @@ func runProjectEditorChecks() {
         expectEqual(e.project.clips[0].media, media)
         expectEqual(e.project.clips[0].id, a.id)
     }
+
+    check("editor: undo of useConstant(nil) restores the picked target and its sticky flag; redo re-applies") {
+        var e = ProjectEditor()
+        e.addClips([clip24(), clip48()])
+        e.useConstant(Rational(1, 24))
+        e.useConstant(nil)
+        expectEqual(e.project.fpsMode, FPSMode.constant(frameDuration: Rational(1, 48)))
+        e.undo()
+        expectEqual(e.project.fpsMode, FPSMode.constant(frameDuration: Rational(1, 24)))
+        expect(!e.targetFollowsHighest, "sticky again")
+        e.addClips([clip48("c.mp4")])
+        expectEqual(e.project.fpsMode, FPSMode.constant(frameDuration: Rational(1, 24)), "still sticky")
+        e.undo()
+        e.redo()
+        expectEqual(e.project.fpsMode, FPSMode.constant(frameDuration: Rational(1, 24)))
+        e.undo()
+        e.redo()
+        expectEqual(e.project.clips.count, 3, "redo re-applies the add")
+    }
+
+    check("editor: undo of a picked target restores following the highest fps") {
+        var e = ProjectEditor()
+        e.addClips([clip24()])
+        e.useConstant(Rational(1, 24))
+        expect(!e.targetFollowsHighest)
+        e.undo()
+        expect(e.targetFollowsHighest)
+        e.addClips([clip48()])
+        expectEqual(e.project.fpsMode, FPSMode.constant(frameDuration: Rational(1, 48)))
+        e.undo()
+        e.redo()
+        expectEqual(e.project.fpsMode, FPSMode.constant(frameDuration: Rational(1, 48)))
+    }
 }

@@ -10,6 +10,7 @@ public struct ProjectEditor: Equatable {
     public struct Snapshot: Equatable {
         public var clips: [Clip]
         public var fpsMode: FPSMode
+        public var targetFollowsHighest: Bool
     }
 
     public private(set) var project: Project
@@ -39,7 +40,8 @@ public struct ProjectEditor: Equatable {
     public var canUndo: Bool { !undoStack.isEmpty }
     public var canRedo: Bool { !redoStack.isEmpty }
 
-    private var snapshot: Snapshot { Snapshot(clips: project.clips, fpsMode: project.fpsMode) }
+    private var snapshot: Snapshot { Snapshot(clips: project.clips, fpsMode: project.fpsMode,
+                                          targetFollowsHighest: targetFollowsHighest) }
 
     /// A clip for a probed file: one auto "whole clip" segment.
     public static func makeClip(url: URL, media: ClipMedia) -> Clip {
@@ -225,9 +227,11 @@ public struct ProjectEditor: Equatable {
 
     /// `nil` = follow the highest fps present; a value = the user's pick (sticky).
     public mutating func useConstant(_ d: Rational?) {
-        targetFollowsHighest = (d == nil)
         let chosen = d ?? FrameRateChoice.highest(for: project.clips) ?? Rational(1, 24)
-        edit { $0.fpsMode = .constant(frameDuration: chosen) }
+        recordUndo()   // before the flag changes, so undo restores the old policy too
+        targetFollowsHighest = (d == nil)
+        project.fpsMode = .constant(frameDuration: chosen)
+        changed()
     }
 
     // MARK: Undo / redo
@@ -247,6 +251,7 @@ public struct ProjectEditor: Equatable {
     private mutating func apply(_ s: Snapshot) {
         project.clips = s.clips
         project.fpsMode = s.fpsMode
+        targetFollowsHighest = s.targetFollowsHighest
         inPoint = nil
         changed()
     }
