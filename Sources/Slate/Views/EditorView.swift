@@ -325,9 +325,10 @@ struct EditorView: View {
     private func installKeyMonitor() {
         guard keyMonitor == nil else { return }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            guard let window = event.window, window === NSApp.mainWindow, !(window is NSPanel) else { return event }
             if let responder = event.window?.firstResponder, responder is NSTextView { return event }
             if vm.isExporting { return event }
-            let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting([.function, .capsLock, .numericPad])
             // 51 = Backspace, 117 = Fn+Delete, 48 = Tab.
             if (event.keyCode == 51 || event.keyCode == 117) && mods.isEmpty {
                 if vm.selectedSegmentID != nil {
