@@ -85,6 +85,7 @@ final class ProjectViewModel {
     var segments: [Segment] { editor.selectedClip?.segments ?? [] }
     var inPoint: CMTime? { editor.inPoint }
     var clipDuration: CMTime { editor.clipEnd ?? .zero }
+    var projectDuration: CMTime { cmTime(plan.totalDuration, timescale: plan.outputTimescale) }
     var timeMap: ProjectTimeMap { ProjectTimeMap(grid: plan.grid) }
     var player: AVPlayer? { mode == .clip ? clipPlayer : projectPlayer }
     var selectedVisuals: ClipVisuals {

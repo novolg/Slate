@@ -225,7 +225,7 @@ struct EditorView: View {
             Text("/")
                 .font(.caption)
                 .foregroundStyle(.tertiary)
-            Text(timestamp(vm.mode == .clip ? vm.clipDuration : vm.plan.totalDuration.cmTime))
+            Text(timestamp(vm.mode == .clip ? vm.clipDuration : vm.projectDuration))
                 .font(.system(.caption, design: .monospaced))
                 .foregroundStyle(.secondary)
             Text(vm.mode == .clip ? "clip" : "project")
