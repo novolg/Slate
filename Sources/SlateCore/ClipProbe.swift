@@ -6,12 +6,14 @@ public enum ClipProbeError: Error, LocalizedError {
     case noVideoTrack
     case readerFailed(String)
     case noFrames
+    case unreadableFormat(String)
 
     public var errorDescription: String? {
         switch self {
         case .noVideoTrack: return "The file has no video track."
         case .readerFailed(let m): return "Could not read the file: \(m)"
         case .noFrames: return "The video track has no frames."
+        case .unreadableFormat(let kind): return "Could not read the \(kind) format of the file."
         }
     }
 }
@@ -24,16 +26,18 @@ public enum ClipProbe {
         }
         let (size, fps, rate, formats) = try await track.load(
             .naturalSize, .nominalFrameRate, .estimatedDataRate, .formatDescriptions)
-        let codec = formats.first.map { CMFormatDescriptionGetMediaSubType($0) } ?? 0
+        guard let videoFormat = formats.first else { throw ClipProbeError.unreadableFormat("video") }
+        let codec = CMFormatDescriptionGetMediaSubType(videoFormat)
         let frames = try await readFrameTable(asset: asset, track: track)
 
         var audio: AudioFormat?
         if let audioTrack = try await asset.loadTracks(withMediaType: .audio).first {
             let audioFormats = try await audioTrack.load(.formatDescriptions)
-            if let f = audioFormats.first,
-               let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(f)?.pointee {
-                audio = AudioFormat(sampleRate: asbd.mSampleRate, channels: Int(asbd.mChannelsPerFrame))
+            guard let f = audioFormats.first,
+                  let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(f)?.pointee else {
+                throw ClipProbeError.unreadableFormat("audio")
             }
+            audio = AudioFormat(sampleRate: asbd.mSampleRate, channels: Int(asbd.mChannelsPerFrame))
         }
 
         return ClipMedia(frames: frames, width: Int(size.width.rounded()), height: Int(size.height.rounded()),
