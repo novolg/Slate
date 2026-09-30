@@ -57,6 +57,8 @@ public struct ExportPlan: Equatable {
     /// The first readable clip. Every other clip must match its size, codec and audio.
     public let reference: ClipMedia?
     public let blockers: [PlanBlocker]
+    /// Mixed mode only, and only when the plan can export: the exact pts the output must decode to.
+    public let expectedPTS: [Rational]?
 
     public var canExport: Bool { blockers.isEmpty }
     public var hasAudio: Bool { reference?.hasAudio ?? false }
@@ -160,9 +162,17 @@ public enum ExportPlanner {
         let timescale = outputTimescale(mode: project.fpsMode, required: requiredTimescales, optional: optionalTimescales)
         if timescale == nil { blockers.append(.timescaleOverflow) }
 
+        var expected: [Rational]?
+        if case .mixed = project.fpsMode, blockers.isEmpty {
+            var tables: [UUID: FrameTable] = [:]
+            for c in project.clips { if let m = c.media { tables[c.id] = m.frames } }
+            expected = ExpectedPTS.mixed(grid: grid.segments, tables: tables)
+        }
+
         return ExportPlan(mode: project.fpsMode, strategy: project.constantStrategy, clips: clipPlans,
                           grid: grid.segments, totalDuration: grid.totalDuration, totalFrames: grid.totalFrames,
-                          outputTimescale: timescale ?? 600, reference: reference, blockers: blockers)
+                          outputTimescale: timescale ?? 600, reference: reference, blockers: blockers,
+                          expectedPTS: expected)
     }
 
     static func decide(_ media: ClipMedia, mode: FPSMode, strategy: ConstantStrategy) -> ClipAction {

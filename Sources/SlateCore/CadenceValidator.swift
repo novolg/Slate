@@ -47,15 +47,24 @@ public enum CadenceValidator {
         return issues
     }
 
-    /// Mixed mode: only frame count and total duration (within 1 ms).
+    /// Mixed mode: frame count, exact total duration and (when given) the exact pts list.
     public static func mixedIssues(frameCount: Int, expectedFrames: Int, duration: Rational,
-                                   expectedDuration: Rational) -> [String] {
+                                   expectedDuration: Rational, pts: [Rational]? = nil,
+                                   expectedPTS: [Rational]? = nil) -> [String] {
         var issues: [String] = []
         if frameCount != expectedFrames {
             issues.append("frame count \(frameCount), expected \(expectedFrames)")
         }
-        if (duration - expectedDuration).magnitude > Rational(1, 1000) {
+        if duration != expectedDuration {
             issues.append("duration \(duration.seconds) s, expected \(expectedDuration.seconds) s")
+        }
+        if let pts, let expectedPTS {
+            var bad = 0
+            for (n, pair) in zip(pts, expectedPTS).enumerated() where pair.0 != pair.1 {
+                if bad < 5 { issues.append("frame \(n) at \(pair.0), expected \(pair.1)") }
+                bad += 1
+            }
+            if bad > 5 { issues.append("\(bad - 5) more frames off the expected time") }
         }
         return issues
     }
@@ -78,7 +87,8 @@ public enum CadenceValidator {
     /// Decode the file (edit lists applied) and check it.
     /// `frameDuration` nil means Mixed mode.
     public static func validate(url: URL, frameDuration: Rational?, expectedFrames: Int,
-                                expectedDuration: Rational, audioSampleRate: Double?) async throws -> CadenceReport {
+                                expectedDuration: Rational, audioSampleRate: Double?,
+                                expectedPTS: [Rational]? = nil) async throws -> CadenceReport {
         let asset = AVURLAsset(url: url)
         guard let videoTrack = try await asset.loadTracks(withMediaType: .video).first else {
             throw ClipProbeError.noVideoTrack
@@ -96,7 +106,8 @@ public enum CadenceValidator {
                                     videoEnd: videoEnd, frameDuration: d, expectedFrames: expectedFrames)
         } else {
             issues += mixedIssues(frameCount: pts.count, expectedFrames: expectedFrames,
-                                  duration: videoEnd - (pts.first ?? .zero), expectedDuration: expectedDuration)
+                                  duration: videoEnd - (pts.first ?? .zero), expectedDuration: expectedDuration,
+                                  pts: pts, expectedPTS: expectedPTS)
         }
 
         if let sampleRate = audioSampleRate {

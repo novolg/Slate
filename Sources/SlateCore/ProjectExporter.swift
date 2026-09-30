@@ -46,7 +46,8 @@ public final class ProjectExporter: @unchecked Sendable {
         try await CadenceValidator.validate(url: url, frameDuration: plan.frameDuration,
                                             expectedFrames: plan.totalFrames,
                                             expectedDuration: plan.totalDuration,
-                                            audioSampleRate: plan.audio?.sampleRate)
+                                            audioSampleRate: plan.audio?.sampleRate,
+                                            expectedPTS: plan.expectedPTS)
     }
 
     /// If set, a file that fails validation is saved here for inspection (Phase 0).
