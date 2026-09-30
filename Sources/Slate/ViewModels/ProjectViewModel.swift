@@ -97,6 +97,17 @@ final class ProjectViewModel {
         set { editor.selectedSegmentID = newValue }
     }
 
+    /// Project-mode playhead as a position inside its clip's card (display only, so Doubles are fine).
+    var stripPlayhead: (clipID: UUID, fraction: Double)? {
+        guard mode == .project, projectTime.isNumeric,
+              let loc = timeMap.locate(quantized(projectTime, timescale: plan.outputTimescale)),
+              let first = timeMap.firstOutputStart(of: loc.clipID) else { return nil }
+        let span = plan.grid.filter { $0.clipID == loc.clipID }.reduce(0.0) { $0 + $1.outputDuration.seconds }
+        guard span > 0 else { return nil }
+        let f = (projectTime.seconds - first.seconds) / span
+        return (loc.clipID, max(0, min(1, f)))
+    }
+
     /// Timeline selection writes go through here: leave Project mode first, then select.
     func selectSegment(_ id: UUID?) {
         ensureClipMode()

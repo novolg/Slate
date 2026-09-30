@@ -31,6 +31,13 @@ struct ClipStripView: View {
                             .offset(x: markerX(marker), y: 7)
                             .allowsHitTesting(false)
                     }
+                    if let ph = vm.stripPlayhead, let i = clips.firstIndex(where: { $0.id == ph.clipID }) {
+                        Rectangle()
+                            .fill(Color.white)
+                            .frame(width: 2, height: L.cardHeight)
+                            .offset(x: L.inset + CGFloat(i) * step + 4 + CGFloat(ph.fraction) * (L.cardWidth - 8), y: 7)
+                            .allowsHitTesting(false)
+                    }
                     ClipStripMouseCapture(
                         onMouseDown: { handleDown($0) },
                         onMouseDragged: { handleDragged($0) },
