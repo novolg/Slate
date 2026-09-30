@@ -13,6 +13,7 @@ Harness.filter = arguments.first
 runSegmentChecks()
 runModelChecks()
 runProjectEditorChecks()
+runPresentationChecks()
 runRationalChecks()
 runFrameTableChecks()
 runFrameGridChecks()
