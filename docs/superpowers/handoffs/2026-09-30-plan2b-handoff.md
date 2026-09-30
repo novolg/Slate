@@ -38,10 +38,10 @@ Date: 2026-09-30. Written after Plan 2A (branch `feat/multi-clip-2a`). Read this
 - `ClipReencoder.swift:200` keeps a `?? cmTime` rounding fallback (unreachable given `T_out`).
 - Checks: see the 2A ledger lines "minor (deferred)" (copied into the final review). NLE (Resolve) compatibility stays UNVERIFIED.
 
-## 4. Ask the user before writing 2B (one at a time, two options with a recommendation)
+## 4. User rulings for 2B (2026-09-30)
 
-- Does Cmd+O on a second file add it to the open project, or open a new window? (Recommend: add to the project; Cmd+Shift+O or a new window for another project.)
-- What happens to the old single-clip Cmd+E flow? (Recommend: the same Export button, for a project with one clip.)
+- Cmd+O on a file while a project is open ADDS the file to the project (multi-select allowed). Opening a `.slate` file replaces the project (ask to save first if there are unsaved changes).
+- Cmd+E exports the whole project through the new export sheet. A project with one clip behaves like the old single-clip export (default name `<basename> — trimmed.mp4`). The old `Exporter` is removed.
 
 ## 5. Environment gotchas
 
