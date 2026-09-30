@@ -95,7 +95,7 @@ struct EditorView: View {
     }
 
     private var constantBinding: Binding<Bool> {
-        Binding(get: { vm.isConstant }, set: { $0 ? vm.setConstant(nil) : vm.setMixed() })
+        Binding(get: { vm.isConstant }, set: { $0 ? vm.resumeConstant() : vm.setMixed() })
     }
 
     // MARK: Toolbar

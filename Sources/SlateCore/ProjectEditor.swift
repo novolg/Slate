@@ -19,6 +19,8 @@ public struct ProjectEditor: Equatable {
     public private(set) var inPoint: CMTime?
     /// True until the user picks a target fps (or loads a saved project).
     public private(set) var targetFollowsHighest: Bool
+    /// The last constant target seen, so Mixed -> Constant can restore a picked fps.
+    public private(set) var lastConstantTarget: Rational?
     /// Bumped by every change of clips or fps mode (drag steps, undo and redo included).
     public private(set) var revision = 0
     private var undoStack: [Snapshot] = []
@@ -28,6 +30,7 @@ public struct ProjectEditor: Equatable {
         self.project = project
         self.targetFollowsHighest = targetFollowsHighest
         self.selectedClipID = project.clips.first?.id
+        if case .constant(let d) = project.fpsMode { lastConstantTarget = d }
     }
 
     // MARK: Reading
@@ -62,6 +65,7 @@ public struct ProjectEditor: Equatable {
             let want = FPSMode.constant(frameDuration: highest)
             if project.fpsMode != want { project.fpsMode = want }
         }
+        if case .constant(let d) = project.fpsMode { lastConstantTarget = d }
         if let id = selectedClipID, !project.clips.contains(where: { $0.id == id }) {
             selectedClipID = project.clips.first?.id
             selectedSegmentID = nil
@@ -232,6 +236,11 @@ public struct ProjectEditor: Equatable {
         targetFollowsHighest = (d == nil)
         project.fpsMode = .constant(frameDuration: chosen)
         changed()
+    }
+
+    /// Mixed -> Constant: follow the highest again if that was the policy, else restore the last pick.
+    public mutating func resumeConstant() {
+        if targetFollowsHighest { useConstant(nil) } else { useConstant(lastConstantTarget ?? Rational(1, 24)) }
     }
 
     // MARK: Undo / redo

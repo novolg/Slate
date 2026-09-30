@@ -37,6 +37,35 @@ func runProjectEditorChecks() {
         expectEqual(e.project.fpsMode, FPSMode.mixed)
     }
 
+    check("editor: Mixed to Constant restores a picked fps") {
+        var e = ProjectEditor()
+        e.addClips([clip24(), clip48()])
+        e.useConstant(Rational(1, 24))
+        e.useMixed()
+        e.resumeConstant()
+        expectEqual(e.project.fpsMode, FPSMode.constant(frameDuration: Rational(1, 24)))
+        expect(!e.targetFollowsHighest)
+    }
+
+    check("editor: Mixed to Constant without a pick follows the highest") {
+        var e = ProjectEditor()
+        e.addClips([clip24()])
+        e.useMixed()
+        e.addClips([clip48()])
+        e.resumeConstant()
+        expectEqual(e.project.fpsMode, FPSMode.constant(frameDuration: Rational(1, 48)))
+        expect(e.targetFollowsHighest)
+    }
+
+    check("editor: a loaded sticky target survives Mixed and back") {
+        var e = ProjectEditor(project: Project(fpsMode: .constant(frameDuration: Rational(1, 24))),
+                              targetFollowsHighest: false)
+        e.addClips([clip48()])
+        e.useMixed()
+        e.resumeConstant()
+        expectEqual(e.project.fpsMode, FPSMode.constant(frameDuration: Rational(1, 24)))
+    }
+
     check("editor: a new clip starts with one auto segment; the first O replaces it, the next O adds") {
         var e = ProjectEditor()
         e.addClips([clip24()])

@@ -535,6 +535,11 @@ final class ProjectViewModel {
         edit { $0.useMixed() }
     }
 
+    func resumeConstant() {
+        ensureClipMode()
+        edit { $0.resumeConstant() }
+    }
+
     func setConstant(_ d: Rational?) {
         ensureClipMode()
         edit { $0.useConstant(d) }
