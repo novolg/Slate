@@ -11,6 +11,7 @@ if let i = arguments.firstIndex(of: "--strict") {
 Harness.filter = arguments.first
 
 runSegmentChecks()
+runModelChecks()
 runRationalChecks()
 runFrameTableChecks()
 runFrameGridChecks()

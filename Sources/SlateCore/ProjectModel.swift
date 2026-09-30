@@ -67,7 +67,9 @@ public struct Project: Equatable {
     public var fpsMode: FPSMode
     public var constantStrategy: ConstantStrategy
 
-    public init(clips: [Clip] = [], fpsMode: FPSMode = .mixed, constantStrategy: ConstantStrategy = .selective) {
+    public init(clips: [Clip] = [],
+                fpsMode: FPSMode = .constant(frameDuration: Rational(1, 24)),
+                constantStrategy: ConstantStrategy = .reencodeAll) {
         self.clips = clips
         self.fpsMode = fpsMode
         self.constantStrategy = constantStrategy
@@ -78,4 +80,24 @@ public struct Project: Equatable {
 public func fourCC(_ s: String) -> FourCharCode {
     precondition(s.utf8.count == 4, "fourCC needs 4 ASCII characters")
     return s.utf8.reduce(0) { ($0 << 8) | FourCharCode($1) }
+}
+
+/// The frame durations the fps picker offers.
+public enum FrameRateChoice {
+    /// Unique frame durations, ascending (so the fastest fps comes first). Exact-CFR clips
+    /// give their exact `d`. Only if no clip is exact CFR, each clip falls back to
+    /// `Rational.frameDuration(fps: nominalFPS)`. Clips without media are ignored.
+    public static func candidates(for clips: [Clip]) -> [Rational] {
+        let medias = clips.compactMap(\.media)
+        var exact = medias.compactMap { $0.frames.exactFrameDuration }
+        if exact.isEmpty {
+            exact = medias.map { Rational.frameDuration(fps: $0.nominalFPS) }
+        }
+        return Array(Set(exact)).sorted()
+    }
+
+    /// The default Constant target: the highest fps present.
+    public static func highest(for clips: [Clip]) -> Rational? {
+        candidates(for: clips).first
+    }
 }
