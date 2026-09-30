@@ -1,6 +1,7 @@
 import Foundation
 import AVFoundation
 import CoreMedia
+import SlateCore
 
 enum ExporterError: Error, LocalizedError {
     case noVideoTrack

@@ -11,8 +11,8 @@ APP_BUNDLE="$PROJECT_ROOT/build/$APP_NAME.app"
 
 cd "$PROJECT_ROOT"
 
-echo "→ swift build -c $CONFIG"
-swift build -c "$CONFIG"
+echo "→ swift build -c $CONFIG --product $APP_NAME"
+swift build -c "$CONFIG" --product "$APP_NAME"
 
 BIN_PATH="$(swift build -c "$CONFIG" --show-bin-path)"
 EXEC="$BIN_PATH/$APP_NAME"

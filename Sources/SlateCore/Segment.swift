@@ -1,27 +1,35 @@
 import Foundation
 import CoreMedia
 
-struct Segment: Identifiable, Equatable {
-    let id: UUID
-    var range: CMTimeRange
+public struct Segment: Identifiable, Equatable {
+    public let id: UUID
+    public var range: CMTimeRange
+    /// True only for the automatic "whole clip" segment a new clip starts with.
+    public var isAuto: Bool
 
-    init(range: CMTimeRange, id: UUID = UUID()) {
+    public init(range: CMTimeRange, id: UUID = UUID(), isAuto: Bool = false) {
         self.id = id
         self.range = range
+        self.isAuto = isAuto
     }
 
-    var start: CMTime { range.start }
-    var end: CMTime { range.end }
-    var duration: CMTime { range.duration }
+    public var start: CMTime { range.start }
+    public var end: CMTime { range.end }
+    public var duration: CMTime { range.duration }
+
+    /// The segment a newly added clip gets: the whole clip, marked auto.
+    public static func wholeClip(duration: CMTime) -> Segment {
+        Segment(range: CMTimeRange(start: .zero, duration: duration), isAuto: true)
+    }
 }
 
-enum SegmentOps {
+public enum SegmentOps {
     /// Sort + merge any overlapping/adjacent segments. When merging, the survivor's id is
     /// `preferredID` if either input had it, otherwise the earlier (lower-start) segment's id
     /// is preserved. This is critical for live-drag stability — without preferring the dragged
     /// segment's id, every drag step would replace the segment with a new UUID and the next
-    /// mouseDragged call would find nothing to update.
-    static func merge(_ segments: [Segment], preferredID: UUID? = nil) -> [Segment] {
+    /// mouseDragged call would find nothing to update. A merged segment is never auto.
+    public static func merge(_ segments: [Segment], preferredID: UUID? = nil) -> [Segment] {
         let sorted = segments.sorted { CMTimeCompare($0.start, $1.start) < 0 }
         var result: [Segment] = []
         for s in sorted {
@@ -42,28 +50,39 @@ enum SegmentOps {
         return result
     }
 
-    /// Insert a new segment, merging with overlapping neighbours. Returns the resulting array.
-    static func insert(_ range: CMTimeRange, into segments: [Segment]) -> [Segment] {
+    /// Insert a new segment, merging with overlapping neighbours.
+    public static func insert(_ range: CMTimeRange, into segments: [Segment]) -> [Segment] {
         guard range.duration.seconds > 0 else { return segments }
         return merge(segments + [Segment(range: range)])
     }
 
+    /// `O` commit. While the clip holds only its auto whole-clip segment, the marked
+    /// range replaces it. Otherwise the range is inserted and merged as before.
+    public static func commitMarked(_ range: CMTimeRange, into segments: [Segment]) -> [Segment] {
+        guard range.duration.seconds > 0 else { return segments }
+        if segments.count == 1, segments[0].isAuto {
+            return [Segment(range: range)]
+        }
+        return insert(range, into: segments)
+    }
+
     /// Update the range of segment `id` and re-merge with `id` as the preferred survivor.
-    static func updateRange(of id: UUID, to range: CMTimeRange, in segments: [Segment]) -> [Segment] {
+    /// The updated segment stops being auto.
+    public static func updateRange(of id: UUID, to range: CMTimeRange, in segments: [Segment]) -> [Segment] {
         guard range.duration.seconds > 0 else {
             return segments.filter { $0.id != id }
         }
         let updated = segments.map { seg -> Segment in
-            seg.id == id ? Segment(range: range, id: id) : seg
+            seg.id == id ? Segment(range: range, id: id, isAuto: false) : seg
         }
         return merge(updated, preferredID: id)
     }
 
-    static func remove(id: UUID, from segments: [Segment]) -> [Segment] {
+    public static func remove(id: UUID, from segments: [Segment]) -> [Segment] {
         segments.filter { $0.id != id }
     }
 
-    static func isValid(_ segments: [Segment]) -> Bool {
+    public static func isValid(_ segments: [Segment]) -> Bool {
         for i in segments.indices {
             if CMTimeCompare(segments[i].start, segments[i].end) >= 0 { return false }
             if i + 1 < segments.count {

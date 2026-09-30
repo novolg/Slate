@@ -2,6 +2,7 @@ import SwiftUI
 import AVFoundation
 import AppKit
 import CoreMedia
+import SlateCore
 
 struct TimelineView: View {
     let vm: EditorViewModel
