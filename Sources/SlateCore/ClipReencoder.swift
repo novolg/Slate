@@ -58,6 +58,14 @@ public struct VideoEncodeSettings: Equatable {
         return VideoEncodeSettings(codec: isHEVC ? .hevc : .h264, width: media.width, height: media.height,
                                    bitsPerSecond: Int(bitrate))
     }
+
+    /// Codec and size of the first clip; bitrate from the clip with the highest data rate.
+    public static func matching(_ medias: [ClipMedia]) -> VideoEncodeSettings {
+        precondition(!medias.isEmpty, "matching needs at least one clip")
+        var reference = medias[0]
+        reference.estimatedDataRate = medias.map(\.estimatedDataRate).max() ?? reference.estimatedDataRate
+        return matching(reference)
+    }
 }
 
 /// Decodes kept ranges, retimes them onto the d grid, and encodes into one file.

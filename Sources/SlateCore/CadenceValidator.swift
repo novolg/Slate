@@ -97,6 +97,7 @@ public enum CadenceValidator {
         let video = try decodedTimes(asset: asset, track: videoTrack, settings: [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
         ])
+        try Task.checkCancellation()
         let videoEnd = Rational(videoRange.end)
         let pts = video.map(\.pts)
 
@@ -110,6 +111,7 @@ public enum CadenceValidator {
                                   pts: pts, expectedPTS: expectedPTS)
         }
 
+        try Task.checkCancellation()
         if let sampleRate = audioSampleRate {
             if let audioTrack = try await asset.loadTracks(withMediaType: .audio).first {
                 let audio = try decodedTimes(asset: asset, track: audioTrack, settings: [
@@ -156,7 +158,10 @@ public enum CadenceValidator {
             throw ClipProbeError.readerFailed(reader.error?.localizedDescription ?? "startReading failed")
         }
         var out: [(pts: Rational, duration: Rational)] = []
+        var seen = 0
         while let buffer = output.copyNextSampleBuffer() {
+            seen += 1
+            if seen % 64 == 0 { try Task.checkCancellation() }
             let pts = CMSampleBufferGetPresentationTimeStamp(buffer)
             guard pts.isNumeric else { continue }
             let dur = CMSampleBufferGetDuration(buffer)

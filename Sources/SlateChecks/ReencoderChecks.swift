@@ -231,4 +231,46 @@ func runReencoderChecks() async {
         expect(report.ok, "\(report.issues)")
         try await assertNoFrameReordering(out)
     }
+
+    check("progress: the clip index follows the written frames") {
+        let counts = [24, 48]
+        expectEqual(ReencodeProgress.clipIndex(fraction: 0, frameCounts: counts), 1)
+        expectEqual(ReencodeProgress.clipIndex(fraction: 23.0 / 72.0, frameCounts: counts), 1)
+        expectEqual(ReencodeProgress.clipIndex(fraction: 24.0 / 72.0, frameCounts: counts), 2)
+        expectEqual(ReencodeProgress.clipIndex(fraction: 1, frameCounts: counts), 2)
+        expectEqual(ReencodeProgress.clipIndex(fraction: 0, frameCounts: [0, 10]), 2)
+        expectEqual(ReencodeProgress.clipIndex(fraction: 0.5, frameCounts: []), 1)
+    }
+
+    check("encoder settings: bitrate comes from the fastest clip, not the first") {
+        let lo = TestData.media(TestData.c24)
+        var hi = TestData.media(TestData.c24)
+        hi.estimatedDataRate = 30_000_000
+        let mixed = VideoEncodeSettings.matching([lo, hi])
+        expectEqual(mixed.bitsPerSecond, VideoEncodeSettings.matching(hi).bitsPerSecond)
+        expect(mixed.bitsPerSecond > VideoEncodeSettings.matching(lo).bitsPerSecond)
+        expectEqual(mixed.codec, VideoEncodeSettings.matching(lo).codec)
+    }
+
+    await checkAsync("exporter: Re-encode all reports the real clip index") {
+        let a = try await loadClip("c24.mp4", keep: [(0.5, 1.5)])
+        let b = try await loadClip("c48.mp4", keep: [(0.5, 1.5)])
+        let out = try checksOutputDirectory().appendingPathComponent("ex-progress-index.mp4")
+        let seen = SeenClips()
+        _ = try await ProjectExporter().export(project: Project(clips: [a, b]), outputURL: out,
+                                               tempDirectory: try checksOutputDirectory(), progress: { stage in
+            if case .reencoding(let k, let n, _) = stage { seen.add(k, of: n) }
+        })
+        expectEqual(seen.of, 2)
+        expect(seen.indices.contains(1) && seen.indices.contains(2), "saw \(seen.indices)")
+    }
+}
+
+final class SeenClips: @unchecked Sendable {
+    private let lock = NSLock()
+    private var set = Set<Int>()
+    private var total = 0
+    func add(_ k: Int, of n: Int) { lock.withLock { set.insert(k); total = n } }
+    var indices: Set<Int> { lock.withLock { set } }
+    var of: Int { lock.withLock { total } }
 }
