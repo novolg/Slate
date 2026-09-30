@@ -48,13 +48,17 @@ struct AppCommands: Commands {
         CommandGroup(replacing: .newItem) {
             Button("New Project") { vm.newProject() }
                 .keyboardShortcut("n")
+                .disabled(vm.isExporting)
             Button("Open…") { vm.openPanel() }
                 .keyboardShortcut("o")
+                .disabled(vm.isExporting)
             Divider()
             Button("Save") { vm.save() }
                 .keyboardShortcut("s")
+                .disabled(vm.isExporting)
             Button("Save As…") { vm.saveAs() }
                 .keyboardShortcut("s", modifiers: [.command, .shift])
+                .disabled(vm.isExporting)
             Divider()
             Button("Export…") { vm.beginExport() }
                 .keyboardShortcut("e")
@@ -63,19 +67,26 @@ struct AppCommands: Commands {
         CommandGroup(replacing: .undoRedo) {
             Button("Undo") { vm.undo() }
                 .keyboardShortcut("z")
+                .disabled(vm.isExporting)
             Button("Redo") { vm.redo() }
                 .keyboardShortcut("z", modifiers: [.command, .shift])
+                .disabled(vm.isExporting)
         }
         CommandMenu("Clip") {
             Button("Previous Clip") { vm.selectPreviousClip() }
+                .disabled(vm.isExporting)
             Button("Next Clip") { vm.selectNextClip() }
+                .disabled(vm.isExporting)
             Divider()
             Button("Duplicate Clip") { vm.duplicateSelectedClip() }
                 .keyboardShortcut("d")
+                .disabled(vm.isExporting)
             Button("Remove Clip") { vm.removeSelectedClip() }
                 .keyboardShortcut(.delete, modifiers: .command)
+                .disabled(vm.isExporting)
             Divider()
             Button("Toggle Clip / Project Player") { vm.toggleMode() }
+                .disabled(vm.isExporting)
         }
     }
 }
