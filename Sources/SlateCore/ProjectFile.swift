@@ -166,14 +166,20 @@ public struct ProjectFile: Codable, Equatable {
         try encoded().write(to: url, options: .atomic)
     }
 
-    /// Read a `.slate` file, resolve the clip paths and probe every file that exists.
-    /// A file that cannot be probed keeps `media == nil` (its card shows as missing).
-    public static func load(from url: URL) async throws -> Project {
-        let file = try decode(try Data(contentsOf: url))
-        var project = file.project(resolvingFrom: url, exists: { FileManager.default.fileExists(atPath: $0.path) })
+    /// Probe every clip whose file exists. A file that cannot be probed keeps `media == nil`
+    /// (its card shows as missing or unreadable).
+    public static func attachMedia(to project: Project) async -> Project {
+        var project = project
         for i in project.clips.indices where FileManager.default.fileExists(atPath: project.clips[i].url.path) {
             project.clips[i].media = try? await ClipProbe.probe(url: project.clips[i].url)
         }
         return project
+    }
+
+    /// Read a `.slate` file, resolve the clip paths and probe every file that exists.
+    public static func load(from url: URL) async throws -> Project {
+        let file = try decode(try Data(contentsOf: url))
+        let project = file.project(resolvingFrom: url, exists: { FileManager.default.fileExists(atPath: $0.path) })
+        return await attachMedia(to: project)
     }
 }

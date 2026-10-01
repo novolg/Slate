@@ -1,0 +1,17 @@
+# Plan 2B — carried minors (from the SDD ledger, 2026-09-30)
+
+Triaged by the final reviewer: everything below is carry (not blocking). Dropped items are not listed.
+
+- Task 1: minor (deferred): no-op drag clears redo stack; endSegmentDrag/no-op useMixed can drop or add an empty undo entry; dragEdge without media unclamped above; drag crossing the opposite edge is ignored silently; undo of removing a non-only selected clip reselects the neighbour
+- Task 2: minor (deferred): Rational.frameDuration(fps:) can still trap for fps < 0.0005 or > ~9e15 (bound to 0.001...1e6 in card and FrameRateChoice); 'Copied as is.' tooltip in Mixed for a timingNotExact clip misleading (planner never re-encodes in Mixed, so cosmetic); blocked clip may show 0.0 kept
+- Task 3: minor (deferred): failing-write case untested; ProjectDocument has no @MainActor annotation; opened(from:) does not discard the untitled autosave (VM must decide); restoredUntitled only checked at revision 0
+- Task 4: minor (deferred): syncClipPlayer drops old player without pause(); isPlaying reads timeControlStatus (not observed by @Observable); audioShortMessage uses live project not export snapshot; stale poster/thumbnails after undo of relink; open(urls:) ignores videos dropped with a .slate; concurrent addFiles clears isLoadingFiles early; Project-mode select of a clip with no kept frames
+- Task 4: minor (deferred, from re-review): quick Project→Clip→Project during a build is lost (no per-request token); Restore then Cancel on the save prompt loses the earlier project (noteChange in defer overwrites it); failed load leaves old project's last edits unwritten until next edit; Esc (clearSelection) always leaves Project mode; toggleMode while pending ignored; cmTime helper multiplies exactly before rounding (theoretical Int64 overflow)
+- Task 5: minor (deferred): clips[from] not bounds-checked in handleUp if the list shrinks mid-drag (add guard); tooltip via toolTip-on-mouseMoved is fragile (prefer per-card rects); no drag auto-scroll/cancel; hit region includes top/bottom margins; white text on dark-only backgrounds; redundant MainActor.run; card vertical fit tight (~95/96 pt); drop outside the content area not covered by the strip delegate — Task 7 must check the window-wide onDrop does not flicker (only a run shows)
+- Task 6: minor (deferred): .yellow text contrast on light appearance; 'Cancelled.' shown as Export failed in red (dedicated ExportUI case would be cleaner); .done shows only the path
+- Task 7: minor (deferred): Fn+Delete branch dead (mods.isEmpty false with .function flag; Caps Lock defeats monitor); key monitor not limited to the editor window (panels/alerts); menu commands enabled while the export sheet is up (add .disabled(vm.isExporting)); Backspace/Esc in Project mode with nothing selected switches modes; timeline stays interactive for a missing-media clip (classify should return .none); consider .interactiveDismissDisabled on the export sheet; needs-a-run list: key focus after clicks, strip-vs-window drop, Finder .slate association, autosave on quit, menu .disabled refresh, dimming
+- Task 7: minor (deferred, from re-review): in Project mode with the playhead in a clip other than the selected one, ensureClipMode inside selectSegment switches the clip so the hit segment id/total/contentWidth belong to the previous clip (rare); edge click does not move the playhead
+
+## Residual Important (not fixed in the run)
+
+- Fixed in 4896497 (`ProjectEditor.resumeConstant()` fell back to a fixed 1/24 when no constant target was known).

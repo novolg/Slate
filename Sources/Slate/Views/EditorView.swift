@@ -6,20 +6,22 @@ import SlateCore
 
 @MainActor
 struct EditorView: View {
-    @State private var vm = EditorViewModel()
+    let vm: ProjectViewModel
     @FocusState private var focused: Bool
     @State private var keyMonitor: Any?
 
     var body: some View {
         VStack(spacing: 0) {
-            header
+            toolbar
             Divider().background(Color.black)
+            notes
             content
         }
         .background(Color.black)
         .focusable()
         .focusEffectDisabled()
         .focused($focused)
+        .navigationTitle(vm.windowTitle)
         .onAppear {
             focused = true
             installKeyMonitor()
@@ -27,132 +29,216 @@ struct EditorView: View {
         .onDisappear {
             if let m = keyMonitor { NSEvent.removeMonitor(m); keyMonitor = nil }
         }
-        .onKeyPress(.space) {
-            vm.togglePlayPause(); return .handled
-        }
-        .onKeyPress(.leftArrow) {
-            vm.stepFrame(by: -1); return .handled
-        }
-        .onKeyPress(.rightArrow) {
-            vm.stepFrame(by: 1); return .handled
-        }
-        .onKeyPress(keys: ["j", "k", "l", "i", "o"]) { press in
+        .task { await vm.offerRestore() }
+        .onKeyPress(.space) { vm.togglePlayPause(); return .handled }
+        .onKeyPress(.leftArrow) { vm.stepFrame(by: -1); return .handled }
+        .onKeyPress(.rightArrow) { vm.stepFrame(by: 1); return .handled }
+        .onKeyPress(keys: ["j", "k", "l", "i", "o", "[", "]"]) { press in
             switch press.characters.lowercased() {
             case "j": vm.nudgeReverse()
             case "k": vm.pause()
             case "l": vm.nudgeForward()
-            case "i": vm.setInPointAtPlayhead()
-            case "o": vm.commitOutPointAtPlayhead()
+            case "i": vm.markIn()
+            case "o": vm.markOut()
+            case "[": vm.selectPreviousClip()
+            case "]": vm.selectNextClip()
             default: return .ignored
             }
             return .handled
         }
-        .onKeyPress(.delete) {
-            vm.deleteSelected(); return .handled
-        }
-        .onKeyPress(.escape) {
-            vm.clearInPoint(); vm.selectedSegmentID = nil; return .handled
-        }
+        .onKeyPress(.delete) { vm.deleteSelectedSegment(); return .handled }
+        .onKeyPress(.escape) { vm.clearSelection(); return .handled }
         .onKeyPress(keys: ["=", "+", "-", "0"]) { press in
             switch press.characters {
             case "=", "+": vm.zoomIn()
-            case "-":      vm.zoomOut()
-            case "0":      vm.resetZoom()
-            default:       return .ignored
+            case "-": vm.zoomOut()
+            case "0": vm.resetZoom()
+            default: return .ignored
             }
             return .handled
         }
-        .onKeyPress(keys: ["z"]) { press in
-            // Undo / redo via Cmd+Z / Shift+Cmd+Z. SwiftUI .onKeyPress doesn't expose modifiers directly,
-            // so we read them from NSEvent.
-            let mods = NSEvent.modifierFlags
-            guard mods.contains(.command) else { return .ignored }
-            if mods.contains(.shift) { vm.redo() } else { vm.undo() }
-            return .handled
+        .onDrop(of: [.fileURL], isTargeted: nil) { providers in
+            Task {
+                let urls = await DroppedFiles.urls(from: providers)
+                await vm.handleDrop(urls, at: nil)
+            }
+            return true
         }
-        .alert("Error",
-               isPresented: Binding(
-                   get: { vm.errorMessage != nil },
-                   set: { if !$0 { /* dismiss handled below */ } }
-               ),
-               presenting: vm.errorMessage) { _ in
-            Button("OK") { /* alert auto-dismisses */ }
-        } message: { msg in
-            Text(msg)
+        .alert("Error", isPresented: errorBinding, presenting: vm.errorMessage) { _ in
+            Button("OK") { vm.clearError() }
+        } message: { message in
+            Text(message)
         }
-        .sheet(isPresented: Binding(
-            get: { vm.isExporting },
-            set: { if !$0 { vm.dismissExport() } }
-        )) {
-            ExportSheet(vm: vm)
+        .sheet(isPresented: exportBinding) {
+            ProjectExportSheet(vm: vm)
         }
     }
 
-    private var header: some View {
+    // MARK: Bindings
+
+    private var errorBinding: Binding<Bool> {
+        Binding(get: { vm.errorMessage != nil }, set: { if !$0 { vm.clearError() } })
+    }
+
+    /// The sheet cannot be dismissed (Esc) while an export runs; use Cancel.
+    private var exportBinding: Binding<Bool> {
+        Binding(get: { vm.isExporting }, set: { shown in
+            if !shown {
+                if case .running = vm.exportUI { return }
+                vm.dismissExport()
+            }
+        })
+    }
+
+    private var modeBinding: Binding<ProjectViewModel.PlayerMode> {
+        Binding(get: { vm.mode }, set: { vm.setMode($0) })
+    }
+
+    private var constantBinding: Binding<Bool> {
+        Binding(get: { vm.isConstant }, set: { $0 ? vm.resumeConstant() : vm.setMixed() })
+    }
+
+    // MARK: Toolbar
+
+    private var toolbar: some View {
         HStack(spacing: 10) {
             Text("Slate")
                 .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(.primary)
-            Text("v1.0")
-                .font(.system(size: 11, weight: .regular, design: .monospaced))
-                .foregroundStyle(.tertiary)
             Spacer()
-            Button {
-                vm.openFile()
-            } label: {
-                Label("Open Source Video", systemImage: "film")
+            if !vm.project.clips.isEmpty {
+                Picker("Player", selection: modeBinding) {
+                    Text("Clip").tag(ProjectViewModel.PlayerMode.clip)
+                    Text("Project").tag(ProjectViewModel.PlayerMode.project)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 140)
+                .help("Clip plays the selected file for trimming; Project plays the assembled result (Tab)")
+
+                Divider().frame(height: 18)
+
+                Picker("Frame rate", selection: constantBinding) {
+                    Text("Constant").tag(true)
+                    Text("Mixed").tag(false)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 170)
+                .help("Constant re-encodes every clip to one frame rate; Mixed copies clips as they are")
+
+                if vm.isConstant { fpsMenu }
+
+                Text(ClipPresentation.summary(vm.plan))
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.secondary)
             }
-            .keyboardShortcut("o", modifiers: .command)
-            .help("Open mp4 (⌘O)")
             Button {
-                vm.startExportFlow()
+                vm.addClipsPanel()
             } label: {
-                Label("Export Trimmed", systemImage: "square.and.arrow.down")
+                Label("Add Clips", systemImage: "plus.rectangle.on.rectangle")
             }
-            .keyboardShortcut("e", modifiers: .command)
-            .disabled(vm.player == nil || vm.segments.isEmpty || vm.isExporting)
-            .help("Export keep-segments without re-encoding (⌘E)")
+            .help("Add clips (⌘O)")
+            Button {
+                vm.beginExport()
+            } label: {
+                Label("Export", systemImage: "square.and.arrow.down")
+            }
+            .disabled(!vm.canExport)
+            .help("Export the project (⌘E)")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .background(Color(white: 0.12))
     }
 
+    private var fpsMenu: some View {
+        Menu {
+            ForEach(vm.fpsChoices, id: \.self) { d in
+                Button(ClipPresentation.fpsText(d)) { vm.setConstant(d) }
+            }
+            Divider()
+            Button("Highest present") { vm.setConstant(nil) }
+        } label: {
+            Text((vm.targetFrameDuration.map(ClipPresentation.fpsText) ?? "—") + (vm.followsHighest ? " (auto)" : ""))
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Output frame rate")
+    }
+
+    @ViewBuilder
+    private var notes: some View {
+        if !vm.project.clips.isEmpty && (!vm.isConstant || vm.previewNote != nil) {
+            VStack(alignment: .leading, spacing: 2) {
+                if !vm.isConstant {
+                    Text(ClipPresentation.mixedLabel).foregroundStyle(.orange)
+                }
+                if let note = vm.previewNote {
+                    Text(note).foregroundStyle(.yellow)
+                }
+            }
+            .font(.caption)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 4)
+            .background(Color(white: 0.10))
+        }
+    }
+
+    // MARK: Content
+
     @ViewBuilder
     private var content: some View {
-        if let player = vm.player {
+        if vm.project.clips.isEmpty {
+            emptyState
+        } else {
             VStack(spacing: 0) {
-                PlayerView(player: player)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                playerArea
+                Divider().background(Color.black)
+                ClipStripView(vm: vm)
                 Divider().background(Color.black)
                 TimelineView(vm: vm)
                 statusBar
             }
-        } else {
-            emptyState
         }
+    }
+
+    private var playerArea: some View {
+        ZStack {
+            Color.black
+            if let player = vm.player {
+                PlayerView(player: player)
+            } else {
+                Text(vm.selectedClip?.media == nil ? "This file is missing" : "No preview")
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var statusBar: some View {
         HStack(spacing: 12) {
             markButtons
-            Text(timestamp(vm.currentTime))
+            Text(timestamp(vm.mode == .clip ? vm.clipTime : vm.projectTime))
                 .font(.system(.caption, design: .monospaced))
                 .foregroundStyle(.secondary)
             Text("/")
                 .font(.caption)
                 .foregroundStyle(.tertiary)
-            Text(timestamp(vm.duration))
+            Text(timestamp(vm.mode == .clip ? vm.clipDuration : vm.projectDuration))
                 .font(.system(.caption, design: .monospaced))
                 .foregroundStyle(.secondary)
+            Text(vm.mode == .clip ? "clip" : "project")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
             Spacer()
-            if vm.isScanningKeyframes {
+            if vm.selectedVisuals.isScanning {
                 ProgressView().controlSize(.small)
-                Text("scanning keyframes…")
+                Text("scanning…")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-            } else if vm.keyframes.count > 0 {
-                Text("\(vm.keyframes.count) keyframes")
+            } else if vm.selectedVisuals.keyframes.count > 0 {
+                Text("\(vm.selectedVisuals.keyframes.count) keyframes")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -165,45 +251,27 @@ struct EditorView: View {
 
     private var markButtons: some View {
         HStack(spacing: 6) {
-            Button {
-                vm.setInPointAtPlayhead()
-            } label: {
-                Text("I")
-                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                    .frame(width: 22, height: 20)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 3)
-                            .stroke(.secondary, lineWidth: 1)
-                    )
-            }
-            .buttonStyle(.borderless)
-            .help("Mark in-point at playhead (I)")
-
-            Button {
-                vm.commitOutPointAtPlayhead()
-            } label: {
-                Text("O")
-                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                    .frame(width: 22, height: 20)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 3)
-                            .stroke(.secondary, lineWidth: 1)
-                    )
-            }
-            .buttonStyle(.borderless)
-            .disabled(vm.inPoint == nil)
-            .help("Mark out-point and commit segment (O)")
+            markButton("I", help: "Mark in-point at the playhead (I)") { vm.markIn() }
+            markButton("O", help: "Mark out-point and commit the segment (O)") { vm.markOut() }
+                .disabled(vm.inPoint == nil)
         }
+    }
+
+    private func markButton(_ label: String, help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(label)
+                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .frame(width: 22, height: 20)
+                .overlay(RoundedRectangle(cornerRadius: 3).stroke(.secondary, lineWidth: 1))
+        }
+        .buttonStyle(.borderless)
+        .help(help)
     }
 
     private var zoomControls: some View {
         HStack(spacing: 4) {
-            Button {
-                vm.zoomOut()
-            } label: {
-                Image(systemName: "minus")
-                    .font(.system(size: 10, weight: .semibold))
-                    .frame(width: 18, height: 18)
+            Button { vm.zoomOut() } label: {
+                Image(systemName: "minus").font(.system(size: 10, weight: .semibold)).frame(width: 18, height: 18)
             }
             .buttonStyle(.borderless)
             .help("Zoom out (−)")
@@ -213,22 +281,14 @@ struct EditorView: View {
                 .foregroundStyle(.secondary)
                 .frame(minWidth: 36)
 
-            Button {
-                vm.zoomIn()
-            } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 10, weight: .semibold))
-                    .frame(width: 18, height: 18)
+            Button { vm.zoomIn() } label: {
+                Image(systemName: "plus").font(.system(size: 10, weight: .semibold)).frame(width: 18, height: 18)
             }
             .buttonStyle(.borderless)
             .help("Zoom in (+)")
 
-            Button {
-                vm.resetZoom()
-            } label: {
-                Image(systemName: "arrow.counterclockwise")
-                    .font(.system(size: 10, weight: .regular))
-                    .frame(width: 18, height: 18)
+            Button { vm.resetZoom() } label: {
+                Image(systemName: "arrow.counterclockwise").font(.system(size: 10)).frame(width: 18, height: 18)
             }
             .buttonStyle(.borderless)
             .help("Reset zoom (0)")
@@ -236,21 +296,49 @@ struct EditorView: View {
         }
     }
 
-    /// Backstop for keyboard input — SwiftUI .onKeyPress can lose focus after clicks
-    /// in NSView-backed children. NSEvent local monitor catches keys reliably.
+    private var emptyState: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "film.stack")
+                .font(.system(size: 56, weight: .light))
+                .foregroundStyle(.tertiary)
+            Text("Drop clips here")
+                .font(.system(size: 28, weight: .light))
+                .foregroundStyle(.secondary)
+            Text("mp4, m4v or mov files — or a .slate project")
+                .font(.callout)
+                .foregroundStyle(.tertiary)
+            HStack {
+                Button("Add Clips…") { vm.addClipsPanel() }
+                    .buttonStyle(.borderedProminent)
+                Button("Open Project…") { vm.openPanel() }
+            }
+            .padding(.top, 8)
+            if vm.isLoadingFiles { ProgressView().controlSize(.small) }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    // MARK: Keys
+
+    /// Backstop for keys SwiftUI `.onKeyPress` loses after clicks in NSView-backed children:
+    /// Backspace/Fn+Delete delete the selected segment, Tab toggles Clip / Project.
     private func installKeyMonitor() {
         guard keyMonitor == nil else { return }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            // Bail out if a text field has focus (so we never eat Backspace from a real input).
-            if let resp = event.window?.firstResponder, resp is NSTextView { return event }
-
-            let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-            // delete (51) = Backspace on Mac;  forwardDelete (117) = Fn+Delete.
+            guard let window = event.window, window === NSApp.mainWindow, !(window is NSPanel) else { return event }
+            if let responder = event.window?.firstResponder, responder is NSTextView { return event }
+            if vm.isExporting { return event }
+            let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting([.function, .capsLock, .numericPad])
+            // 51 = Backspace, 117 = Fn+Delete, 48 = Tab.
             if (event.keyCode == 51 || event.keyCode == 117) && mods.isEmpty {
-                if vm.selectedSegmentID != nil && !vm.isExporting {
-                    vm.deleteSelected()
+                if vm.selectedSegmentID != nil {
+                    vm.deleteSelectedSegment()
                     return nil
                 }
+            }
+            if event.keyCode == 48 && mods.isEmpty && !vm.project.clips.isEmpty {
+                vm.toggleMode()
+                return nil
             }
             return event
         }
@@ -262,27 +350,7 @@ struct EditorView: View {
         let h = Int(s) / 3600
         let m = (Int(s) % 3600) / 60
         let sec = s.truncatingRemainder(dividingBy: 60)
-        if h > 0 {
-            return String(format: "%d:%02d:%05.2f", h, m, sec)
-        }
+        if h > 0 { return String(format: "%d:%02d:%05.2f", h, m, sec) }
         return String(format: "%d:%05.2f", m, sec)
-    }
-
-    private var emptyState: some View {
-        VStack(spacing: 14) {
-            Image(systemName: "film.stack")
-                .font(.system(size: 56, weight: .light))
-                .foregroundStyle(.tertiary)
-            Text("Slate")
-                .font(.system(size: 32, weight: .light))
-                .foregroundStyle(.secondary)
-            Text("Open an mp4 to begin")
-                .font(.callout)
-                .foregroundStyle(.tertiary)
-            Button("Open…") { vm.openFile() }
-                .buttonStyle(.borderedProminent)
-                .padding(.top, 8)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
