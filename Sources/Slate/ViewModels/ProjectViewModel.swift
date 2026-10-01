@@ -198,9 +198,14 @@ final class ProjectViewModel {
             documentVersion += 1
             autosaver?.noteChange()
             if mode == .project {
-                // Safety net: the plan changed under the Project player; go back to Clip mode unmapped.
-                mode = .clip
-                projectPlayer?.pause()
+                // The plan changed under the Project player: stay in Project mode and rebuild the preview.
+                if project.clips.isEmpty {
+                    pendingProjectMode = false
+                    dropProjectPlayer()
+                    mode = .clip
+                } else {
+                    refreshProjectPreview()
+                }
             }
         }
         if mode == .clip { syncClipPlayer() }
@@ -271,7 +276,6 @@ final class ProjectViewModel {
             }
         }
         if !clips.isEmpty {
-            ensureClipMode()
             edit { $0.addClips(clips, at: index) }
             for clip in clips { ensurePoster(clip.id) }
         }
@@ -429,17 +433,14 @@ final class ProjectViewModel {
     }
 
     func moveClip(_ id: UUID, to index: Int) {
-        ensureClipMode()
         edit { $0.moveClip(id, to: index) }
     }
 
     func removeClip(_ id: UUID) {
-        ensureClipMode()
         edit { $0.removeClip(id) }
     }
 
     func duplicateClip(_ id: UUID) {
-        ensureClipMode()
         edit { $0.duplicateClip(id) }
         if let selected = editor.selectedClipID { ensurePoster(selected) }
     }
@@ -461,7 +462,6 @@ final class ProjectViewModel {
         Task {
             do {
                 let media = try await ClipProbe.probe(url: url)
-                ensureClipMode()
                 visuals[id] = nil
                 clipLoadedID = nil
                 edit { $0.relinkClip(id, url: url, media: media) }
@@ -504,7 +504,6 @@ final class ProjectViewModel {
 
     /// Esc: drop the pending in-point and the segment selection.
     func clearSelection() {
-        ensureClipMode()
         edit {
             $0.clearInPoint()
             $0.selectedSegmentID = nil
@@ -532,29 +531,24 @@ final class ProjectViewModel {
     }
 
     func undo() {
-        ensureClipMode()
         edit { $0.undo() }
     }
 
     func redo() {
-        ensureClipMode()
         edit { $0.redo() }
     }
 
     // MARK: Frame rate
 
     func setMixed() {
-        ensureClipMode()
         edit { $0.useMixed() }
     }
 
     func resumeConstant() {
-        ensureClipMode()
         edit { $0.resumeConstant() }
     }
 
     func setConstant(_ d: Rational?) {
-        ensureClipMode()
         edit { $0.useConstant(d) }
     }
 
@@ -591,7 +585,7 @@ final class ProjectViewModel {
         if isProject {
             projectTime = t
             // In Project mode the selection follows the playhead.
-            if mode == .project, let loc = timeMap.locate(quantized(t, timescale: plan.outputTimescale)), loc.clipID != editor.selectedClipID {
+            if mode == .project, !projectStale, let loc = timeMap.locate(quantized(t, timescale: plan.outputTimescale)), loc.clipID != editor.selectedClipID {
                 editor.selectClip(loc.clipID)
                 ensureVisuals(loc.clipID)
             }
@@ -617,7 +611,7 @@ final class ProjectViewModel {
 
     func setMode(_ new: PlayerMode) {
         if new == .clip { pendingProjectMode = false }
-        guard new != mode else { return }
+        guard new != mode || (new == .project && projectPlayer == nil) else { return }
         switch new {
         case .clip:
             ensureClipMode()
@@ -630,6 +624,20 @@ final class ProjectViewModel {
     }
 
     func toggleMode() { setMode(mode == .clip ? .project : .clip) }
+
+    /// Double-click on a card: select the clip and open it in the Clip player.
+    func openClipForEditing(_ id: UUID) {
+        selectClip(id)
+        setMode(.clip)
+    }
+
+    /// An edit in Project mode: pause and rebuild the preview, then show the selected clip's start.
+    private func refreshProjectPreview() {
+        projectPlayer?.pause()
+        guard !pendingProjectMode else { return } // the running build sees the new revision and retries
+        pendingProjectMode = true
+        Task { await enterProjectMode() }
+    }
 
     private enum PreviewBuild { case ready, stale, failed }
 
@@ -644,13 +652,15 @@ final class ProjectViewModel {
         guard pendingProjectMode else { return }
         if result == .stale {
             previewNote = "Preview unavailable: the project changed while the preview was being built."
+            if mode == .project { dropProjectPlayer() }
             return
         }
         guard result == .ready, projectPlayer != nil else { return }
         var start = Rational.zero
         if let id = editor.selectedClipID {
             let ts = sourceTimescale(of: id)
-            if clipTime.isNumeric, let t = timeMap.projectTime(clipID: id, sourceTime: quantized(clipTime, timescale: ts)) {
+            // Already in Project mode (a rebuild after an edit): the clip time is old, so use the clip start.
+            if mode == .clip, clipTime.isNumeric, let t = timeMap.projectTime(clipID: id, sourceTime: quantized(clipTime, timescale: ts)) {
                 start = t
             } else if let first = timeMap.firstOutputStart(of: id) {
                 start = first
@@ -663,6 +673,7 @@ final class ProjectViewModel {
     /// Leave Project mode: pause, select the clip under the project playhead, load it, and seek it to
     /// the mapped source time — so an edit command lands on the frame the user saw.
     func ensureClipMode() {
+        pendingProjectMode = false
         guard mode == .project else { return }
         projectPlayer?.pause()
         // The periodic observer can be 100 ms stale; ask the paused player for the exact frame.

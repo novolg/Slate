@@ -14,6 +14,7 @@ struct ClipStripMouseCapture: NSViewRepresentable {
     var onMouseDown: (CGPoint) -> Void
     var onMouseDragged: (CGPoint) -> Void
     var onMouseUp: (CGPoint) -> Void
+    var onDoubleClick: (CGPoint) -> Void
     var tooltipAt: (CGPoint) -> String?
     var menuItemsAt: (CGPoint) -> [StripMenuItem]
 
@@ -31,6 +32,7 @@ struct ClipStripMouseCapture: NSViewRepresentable {
         view.onMouseDown = onMouseDown
         view.onMouseDragged = onMouseDragged
         view.onMouseUp = onMouseUp
+        view.onDoubleClick = onDoubleClick
         view.tooltipAt = tooltipAt
         view.menuItemsAt = menuItemsAt
     }
@@ -41,6 +43,7 @@ final class ClipStripNSView: NSView {
     var onMouseDown: ((CGPoint) -> Void)?
     var onMouseDragged: ((CGPoint) -> Void)?
     var onMouseUp: ((CGPoint) -> Void)?
+    var onDoubleClick: ((CGPoint) -> Void)?
     var tooltipAt: ((CGPoint) -> String?)?
     var menuItemsAt: ((CGPoint) -> [StripMenuItem])?
     private var trackingArea: NSTrackingArea?
@@ -60,7 +63,10 @@ final class ClipStripNSView: NSView {
 
     private func point(_ event: NSEvent) -> CGPoint { convert(event.locationInWindow, from: nil) }
 
-    override func mouseDown(with event: NSEvent) { onMouseDown?(point(event)) }
+    override func mouseDown(with event: NSEvent) {
+        onMouseDown?(point(event))
+        if event.clickCount == 2 { onDoubleClick?(point(event)) }
+    }
     override func mouseDragged(with event: NSEvent) { onMouseDragged?(point(event)) }
     override func mouseUp(with event: NSEvent) { onMouseUp?(point(event)) }
 

@@ -42,6 +42,7 @@ struct ClipStripView: View {
                         onMouseDown: { handleDown($0) },
                         onMouseDragged: { handleDragged($0) },
                         onMouseUp: { handleUp($0) },
+                        onDoubleClick: { handleDoubleClick($0) },
                         tooltipAt: { tooltip(at: $0) },
                         menuItemsAt: { menuItems(at: $0) })
                         .frame(width: contentWidth, height: L.stripHeight + 14)
@@ -127,6 +128,11 @@ struct ClipStripView: View {
         guard clips.indices.contains(from) else { return }
         let final = insert > from ? insert - 1 : insert
         if final != from { vm.moveClip(clips[from].id, to: final) }
+    }
+
+    private func handleDoubleClick(_ p: CGPoint) {
+        guard let i = index(at: p.x) else { return }
+        vm.openClipForEditing(clips[i].id)
     }
 
     private func tooltip(at p: CGPoint) -> String? {
